@@ -71,6 +71,79 @@ HandleProtocolFallback (
   return Status;
 }
 
+// TODO: переместить в заголовок или наверх, поискать как объявляются макросы в этом проекте по кодстайлу.
+#if defined(__GNUC__) || defined(__clang__)
+#define OFFSETOF(TYPE, MEMBER) __builtin_offsetof(TYPE, MEMBER)
+#elif defined(_MSC_VER)
+#define OFFSETOF(TYPE, MEMBER) offsetof(TYPE, MEMBER)
+#endif
+
+/**
+  Sets screen resolution during initialization.
+  
+  First, tries to select VGA standard graphics mode, as it should be compatible with all videocards.
+  The problem may arise that screen of the user may have different ppi's. We don't know what's the best
+  variant here. We can't get PPI value. That's why we select the VGA standard. People expect it can
+  appear as well.
+  
+  Ignores color modes: 16bit, 32bit or 64bit -- doesn't matter, the first one in the list selected.
+  If it will be found that some motherboards order color modes randomly relative to each other,
+  
+  If standard VGA graphics mode is not available, does nothing.
+
+  @param[in] EFI_GRAPHICS_OUTPUT_PROTOCOL  UEFI's graphics output protocol.
+**/
+STATIC
+VOID
+SetScreenResolution (
+  IN EFI_GRAPHICS_OUTPUT_PROTOCOL  *GraphicsOutput
+  )
+{
+  EFI_STATUS Status = EFI_SUCCESS;
+  
+  ASSERT (GraphicsOutput != NULL);
+  
+  UINT32 NumGraphicsModes = GraphicsOutput->Mode->MaxMode;
+
+  UINT32 FoundModeIndex = 0;
+  BOOLEAN FoundMode = FALSE;
+  
+  static const UINT32 STD_VGA_HORIZONTAL_RESOLUTION = 640;
+  static const UINT32 STD_VGA_VERTICAL_RESOLUTION = 480;
+  
+  for (UINT32 ModeIndex = 0; ModeIndex < NumGraphicsModes; ++ModeIndex) {
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *ModeInformation = NULL;
+    UINTN SizeOfModeInfo = 0;
+    
+    Status = GraphicsOutput->QueryMode (GraphicsOutput, ModeIndex, &SizeOfModeInfo, &ModeInformation);
+    if (EFI_ERROR (Status)) {
+      continue;
+    }
+    
+    ASSERT (ModeInformation != NULL);
+    
+    // TODO: find ifs with long conditions to see what is the codestyle for them.
+    if (SizeOfModeInfo <= OFFSETOF (EFI_GRAPHICS_OUTPUT_MODE_INFORMATION, HorizontalResolution) || ModeInformation->HorizontalResolution != STD_VGA_HORIZONTAL_RESOLUTION ) {
+      continue;
+    }
+    
+    if (SizeOfModeInfo <= OFFSETOF (EFI_GRAPHICS_OUTPUT_MODE_INFORMATION, VerticalResolution) || ModeInformation->VerticalResolution != STD_VGA_VERTICAL_RESOLUTION) {
+      continue;
+    }
+        
+    FoundModeIndex = ModeIndex;
+    FoundMode = TRUE;
+    
+    break;
+  }
+
+  if (FoundMode) { 
+    Status = GraphicsOutput->SetMode (GraphicsOutput, FoundModeIndex);
+  }
+
+  DEBUG ((DEBUG_INFO, "JOS: Setting screen resolution - %r, FoundMode = %d\n", Status, (int) FoundMode));
+}
+
 /**
   Initialise graphics rendering and set loader params.
 
@@ -114,6 +187,7 @@ InitGraphics (
   // Hint: Use GetMode/SetMode functions.
   //
 
+  SetScreenResolution (GraphicsOutput);
 
   //
   // Fill screen with black.
@@ -977,7 +1051,7 @@ UefiMain (
   UINTN              EntryPoint;
   VOID               *GateData;
 
-#if 1 ///< Uncomment to await debugging
+#if 0 // Set to 1 to wait for debugger
   volatile BOOLEAN   Connected;
   DEBUG ((DEBUG_INFO, "JOS: Awaiting debugger connection\n"));
 
