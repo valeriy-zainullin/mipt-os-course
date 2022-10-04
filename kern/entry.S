@@ -71,7 +71,6 @@ save_trapframe:
 .globl sys_yield
 .type  sys_yield, @function
 sys_yield:
-    cli
     call save_trapframe_syscall
     # call select_kernel_stack # Doesn't work for some reason, breaks the code.
     call csys_yield
