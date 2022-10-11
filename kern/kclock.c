@@ -2,6 +2,7 @@
 
 #include <inc/x86.h>
 #include <kern/kclock.h>
+#include <kern/timer.h>
 #include <kern/trap.h>
 #include <kern/picirq.h>
 
@@ -82,14 +83,14 @@ cmos_read16(uint8_t reg) {
     return cmos_read8(reg) | (cmos_read8(reg + 1) << 8);
 }
 
-void
+static void
 rtc_timer_pic_interrupt(void) {
     // LAB 4: Your code here
     // Enable PIC interrupts.
     pic_irq_unmask(IRQ_CLOCK);
 }
 
-void
+static void
 rtc_timer_pic_handle(void) {
     // Tell the RTC that we have processed the interrupt.
     // The same we would do with a keyboard, blinking to the port dedicated to it.
@@ -108,6 +109,13 @@ rtc_timer_pic_handle(void) {
 static const uint8_t RTC_REG_A = 10;
 static const uint8_t RTC_REG_B = 11;
 static const uint8_t RTC_REG_C = 12;
+
+struct Timer timer_rtc = {
+        .timer_name = "rtc",
+        .timer_init = rtc_timer_init,
+        .enable_interrupts = rtc_timer_pic_interrupt,
+        .handle_interrupts = rtc_timer_pic_handle,
+};
 
 void
 rtc_timer_init(void) {
