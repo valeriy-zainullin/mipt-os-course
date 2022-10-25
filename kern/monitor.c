@@ -17,6 +17,7 @@
 #include <kern/kclock.h>
 #include <kern/kdebug.h>
 #include <kern/monitor.h>
+#include <kern/pmap.h>
 #include <kern/trap.h>
 
 #define WHITESPACE "\t\r\n "
@@ -31,6 +32,7 @@ int mon_dumpcmos(int argc, char **argv, struct Trapframe *tf);
 int mon_timer_start(int argc, char **argv, struct Trapframe *tf);
 int mon_timer_stop(int argc, char **argv, struct Trapframe *tf);
 int mon_timer_frequency(int argc, char **argv, struct Trapframe *tf);
+int mon_memory(int argc, char **argv, struct Trapframe *tf);
 
 struct Command {
     const char *name;
@@ -196,6 +198,11 @@ mon_timer_frequency(int argc, char **argv, struct Trapframe *tf) {
 
     return 0;
 }
+
+/* Implement memory (mon_memory) command.
+ * This command should call dump_memory_lists()
+ */
+// LAB 6: Your code here
 
 /* Kernel monitor command interpreter */
 
