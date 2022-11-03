@@ -96,5 +96,18 @@ find_function(const char *const fname) {
 
     // LAB 3: Your code here:
 
-    return 0;
+    struct Dwarf_Addrs addrs;
+    load_kernel_dwarf_info(&addrs);
+
+    uintptr_t offset = 0;
+
+    if (address_by_fname(&addrs, fname, &offset) < 0) {
+        return 0;
+    }
+
+    // Debug output. Was used to finish binding implementation.
+    // These comments (this one and surrounding) are safe to delete if not needed.
+    // cprintf("Function %s was found at %p.\n", fname, (void const*) offset);
+
+    return offset;
 }

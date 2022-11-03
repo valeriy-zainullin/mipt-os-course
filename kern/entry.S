@@ -75,6 +75,7 @@ sys_yield:
 .globl sys_exit
 .type  sys_exit, @function
 sys_exit:
+    call csys_exit
     jmp .
 
 #endif

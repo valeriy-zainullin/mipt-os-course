@@ -28,4 +28,6 @@ args_exist:
     movq (%rsp), %rdi
     xorl %ebp, %ebp
     call libmain
+    mov $sys_exit, %rax
+    call *%rax # Defined in the C though... In lib.h.
     jmp .
