@@ -71,6 +71,15 @@ dwarf_read_abbrev_entry(const void *entry, unsigned form, void *buf, int bufsize
     case DW_FORM_block2: {
         /* Read block of 2-byte length followed by 0 to 65535 contiguous information bytes */
         // LAB 2: Your code here
+        Dwarf_Half length = get_unaligned(entry, Dwarf_Half);
+        entry += sizeof(Dwarf_Half);
+        struct Slice slice = {
+                .mem = entry,
+                .len = length,
+        };
+        if (buf) memcpy(buf, &slice, sizeof(struct Slice));
+        entry += length;
+        bytes = sizeof(Dwarf_Half) + length;
     } break;
     case DW_FORM_block4: {
         uint32_t length = get_unaligned(entry, uint32_t);
@@ -512,9 +521,23 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
 
             if (!func_offset) break;
 
+            // At pubnames we have entities and their names.
+            // At pubnames entry at this point we have the
+            //   name of the entity. If the entity we are
+            //   looking at has the name of the function we
+            //   are looking for, we proceed.
             if (!strcmp(fname, (const char *)pubnames_entry)) {
+                // Now that we've found the function (It's the
+                //   only entity with such name, right? Maybe
+                //   that's guaranteed by the dwarf spec that
+                //   it must be true. But for the kernel we
+                //   know that this is true.)
                 /* Parse compilation unit header */
                 const uint8_t *entry = addrs->info_begin + cu_offset;
+                // In the compilation header there are addresses of the entry in all debug segments.
+                // They have the remaining information about the entry. Dwarf format is like a number
+                //   of segments, in each segment there is a tree with some information about the
+                //   entities? (TODO: CHECK, then replace the question mark with a period).
                 const uint8_t *func_entry = entry + func_offset;
                 entry += count = dwarf_entry_len(entry, &len);
                 if (!count) return -E_BAD_DWARF;
@@ -545,6 +568,7 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
                     do {
                         abbrev_entry += dwarf_read_uleb128(abbrev_entry, &name);
                         abbrev_entry += dwarf_read_uleb128(abbrev_entry, &form);
+                        // Abbrev entry has only two fields, otherwise we'd have to skip more fields in here.
                     } while (name || form);
                 }
                 /* Find low_pc */
@@ -560,9 +584,33 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
                      * Attribute value can be obtained using dwarf_read_abbrev_entry function. */
                     uintptr_t low_pc = 0;
                     // LAB 3: Your code here:
-
-
-                    *offset = low_pc;
+                    // cprintf("address_by_fname: at attributes.\n");
+                    // Similar to the code from function_by_info, we do what is said above with
+                    //   the inspiration from there.
+                    // TODO: what is in abbrev entry?
+                    do {
+                        abbrev_entry += dwarf_read_uleb128(abbrev_entry, &name);
+                        abbrev_entry += dwarf_read_uleb128(abbrev_entry, &form);
+                        // cprintf("fname = %s, abbrev_entry_name = 0x%" PRIx64 ", abbren_entry_form = 0x%" PRIx64 ".\n", fname, name, form);
+                        // cprintf("abbrev entry offset = 0x%zx.\n", (size_t) (abbrev_entry - addrs->abbrev_begin));
+                        // cprintf("entry offset = %zx.\n", (size_t) (entry - addrs->info_begin));
+                        if (name == DW_AT_low_pc) {
+                            entry += dwarf_read_abbrev_entry(entry, form, &low_pc, sizeof(low_pc), address_size);
+                            // cprintf("address_by_fname: at DW_AT_low_pc.\n");
+                            *offset = low_pc;
+                            return 0;
+                        } else {
+                            // We have to skip an entry of a different type. Does it always has size of address_size?
+                            //   TODO: figure out, clarify here.
+                            entry += dwarf_read_abbrev_entry(entry, form, NULL, 0, address_size);
+                        }
+                    } while (name || form);
+                    // A function can be present in many compilation units.
+                    //   If we've found an entry for it, but it doesn't have an address, we should
+                    //   continue to look for entries. For example, such thing happens with "cprintf":
+                    //   it's defined in printf.c, but present in both init.c and printf.c in the dwarf debug
+                    //   info. The entry in init.c doesn't have DW_AT_low_pc attribute. Maybe because the
+                    //   compilation unit only has a declaration, not definition.
                 } else {
                     /* Skip if not a subprogram or label */
                     do {
@@ -571,7 +619,7 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
                         entry += dwarf_read_abbrev_entry(entry, form, NULL, 0, address_size);
                     } while (name || form);
                 }
-                return 0;
+                // If address wasn't found, we should continue to look for an entry with a virtual address.
             }
             pubnames_entry += strlen((const char *)pubnames_entry) + 1;
         }

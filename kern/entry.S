@@ -59,7 +59,12 @@ save_trapframe:
 
     PUSHA
 
+    # TODO: how do these values end up in env's trap frame?
+    #   Check if they are written there.
+
+    # Xoring ebp to not feed rubbish values to the kernel code.
     xor %ebp, %ebp
+    # Stack now has trapframe on it. It's copied to rdi to make the first argument.
     movq %rsp, %rdi
     jmp *save_trapframe_ret(%rip)
 
@@ -68,6 +73,7 @@ save_trapframe:
 sys_yield:
     cli
     call save_trapframe_syscall
+    # call select_kernel_stack # Doesn't work for some reason, breaks the code.
     call csys_yield
     jmp .
 
@@ -75,10 +81,33 @@ sys_yield:
 .globl sys_exit
 .type  sys_exit, @function
 sys_exit:
+    cli
+    call save_trapframe_syscall
+    call select_kernel_stack
+    call csys_exit
     jmp .
 
 #endif
 
+select_kernel_stack:
+    # We can overwrite this stack, because upon env_pop_tf
+    #   all objects on the stack are considered deleted.
+    # We should not create objects on stack that meant to
+    #   outlive a context switch.
+    # Also, we have to switch stacks, because user space
+    #   stack can be both exausted and of unknown size.
+    #   It's important for kernel stability.
+    mov  (%rsp), %rax          # Store return address
+    leaq bootstacktop(%rip),%rsp
+    push %rax                  # Push return address back
+    # We have some rubbish in rbp from the user space
+    #   program.
+    # We need to zero it out, so that
+    #   entry and leave instructions would work?
+    # TODO: figure this out. The first claim holds
+    #   anyway, I'll leave it here.
+    xor %ebp, %ebp
+    ret
 
 .data
 
