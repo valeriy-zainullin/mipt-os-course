@@ -848,6 +848,13 @@ csys_yield(struct Trapframe *tf) {
 
 _Noreturn void
 env_pop_tf(struct Trapframe *tf) {
+    /* Push RIP on program stack */
+    tf->tf_rsp -= sizeof(uintptr_t);
+    *((uintptr_t *)tf->tf_rsp) = tf->tf_rip;
+    /* Push RFLAGS on program stack */
+    tf->tf_rsp -= sizeof(uintptr_t);
+    *((uintptr_t *)tf->tf_rsp) = tf->tf_rflags;
+
     asm volatile(
             "movq %0, %%rsp\n"
             "movq 0(%%rsp), %%r15\n"
@@ -872,7 +879,7 @@ env_pop_tf(struct Trapframe *tf) {
             : "memory");
 
     /* Mostly to placate the compiler */
-    panic("Reached unrecheble\n");
+    panic("Reached unreachable\n");
 }
 
 /* Context switch from curenv to env.
