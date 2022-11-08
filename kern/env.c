@@ -514,8 +514,8 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
     // FIXME: check the elf header specifies the architecture the OS running on.
 
     // Check the elf header fits into the file.
-    //   Otherwise it can have it. Also we'd access the field of the header,
-    //   we should know we won't overflow the buffer and that way won't use
+    //   We'd access the field of the header, we should know
+    //   we won't overflow the buffer and that way won't use
     //   initialized memory.
     if (sizeof(struct Elf) > size) {
         return -E_INVALID_EXE;
@@ -604,8 +604,8 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
     // Overflows are not possible here, as if an offset is greater than max value
     //   of size_t, then it is greater than size. size has type size_t, that's why.
     //   Otherwise, it would be possible.
-    // TODO: load sections that have to be loaded. // struct Secthdr const* section_headers = (struct Secthdr const*) (binary + elf_header->e_shoff);
     struct Proghdr const* program_headers = (struct Proghdr const*) (binary + elf_header->e_phoff);
+    struct Secthdr const* section_headers = (struct Secthdr const*) (binary + elf_header->e_shoff);
 
     // FIXME: check none of segments and sections overlap in virtual memory.
 
@@ -630,25 +630,6 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
     }
     
     // UINT64 section_name_table_off = sections[elf_header->e_shstrndx].sh_offset;
-    /*
-    STATIC struct {
-    CONST CHAR8  *Name;
-    UINTN        StartOffset;
-    UINTN        EndOffset;
-    } mDebugMapping[] = {
-        {".debug_aranges",  OFFSET_OF (LOADER_PARAMS, DebugArangesStart),  OFFSET_OF (LOADER_PARAMS, DebugArangesEnd)},
-        {".debug_abbrev",   OFFSET_OF (LOADER_PARAMS, DebugAbbrevStart),   OFFSET_OF (LOADER_PARAMS, DebugAbbrevEnd)},
-        {".debug_info",     OFFSET_OF (LOADER_PARAMS, DebugInfoStart),     OFFSET_OF (LOADER_PARAMS, DebugInfoEnd)},
-        {".debug_line",     OFFSET_OF (LOADER_PARAMS, DebugLineStart),     OFFSET_OF (LOADER_PARAMS, DebugLineEnd)},
-        {".debug_str",      OFFSET_OF (LOADER_PARAMS, DebugStrStart),      OFFSET_OF (LOADER_PARAMS, DebugStrEnd)},
-        {".debug_pubnames", OFFSET_OF (LOADER_PARAMS, DebugPubnamesStart), OFFSET_OF (LOADER_PARAMS, DebugPubnamesEnd)},
-        {".debug_pubtypes", OFFSET_OF (LOADER_PARAMS, DebugPubtypesStart), OFFSET_OF (LOADER_PARAMS, DebugPubtypesEnd)},
-        {".symtab",         OFFSET_OF (LOADER_PARAMS, SymbolTableStart),   OFFSET_OF (LOADER_PARAMS, SymbolTableEnd)},
-        {".strtab",         OFFSET_OF (LOADER_PARAMS, StringTableStart),   OFFSET_OF (LOADER_PARAMS, StringTableEnd)},
-    };
-
-    Status = EFI_SUCCESS;
-    */
 
     // Maybe we do need sections for debug information. Don't load it for now.
     // Implement in case needed. Look at bootloader.
@@ -682,16 +663,22 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
 
     // Also, we have to load sections with sh_addr != 0.
     // https://refspecs.linuxfoundation.org/elf/gabi4+/ch4.sheader.html
-    for (UINT16 segment_index = 0; segment_index < elf_header->e_phnum; ++segment_index) {
-        struct Proghdr const* program_header = &program_headers[segment_index];
-        if (program_header->p_type == PT_LOAD && program_header->p_filesz > 0) {
-            // Check the segment is fully in file.
+    for (UINT16 section_index = 0; section_index < elf_header->e_shnum; ++section_index) {
+        struct Secthdr const* section_header = &section_headers[section_index];
+        // This section is not present in the file anyways.
+        //   I think it's not intended to be created in virtual memory.
+        static const UINT32 ELF_SHT_NOBITS = 0x8;
+        if (section_header->sh_type == ELF_SHT_NOBITS) {
+            continue;
+        }
+        if (section_header->sh_addr != 0) {
+            // Check the section is fully in file.
             //   To not use uninitialized memory.
             // FIXME: check for overflows.
-            if (program_header->p_offset + program_header->p_filesz > size) {
+            if (section_header->sh_offset + section_header->sh_size > size) {
                 return -E_INVALID_EXE;
             }
-            memcpy((void*) (size_t) program_header->p_pa, (void const*) ((char const*) binary + program_header->p_offset), program_header->p_filesz);
+            memcpy((void*) (size_t) section_header->sh_addr, (void const*) ((char const*) binary + section_header->sh_offset), section_header->sh_size);
         }
     }
 
