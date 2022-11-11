@@ -382,7 +382,7 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
             continue;
         }
 
-        // Must be uninitialized (reside in .bss) in order for us to even touch
+            // Must be uninitialized (reside in .bss) in order for us to even touch
         //   it's value.
         if (symbol_va < bss_section_va_start || symbol_va >= bss_section_va_past_end) {
             continue;
