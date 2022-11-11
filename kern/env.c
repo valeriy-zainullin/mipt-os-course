@@ -377,7 +377,7 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
             continue;
         }
 
-        // Must be uninitialized (reside in .bss) in order for us to even touch
+            // Must be uninitialized (reside in .bss) in order for us to even touch
         //   it's value.
         if (symbol_va < bss_section_va_start || symbol_va >= bss_section_va_past_end) {
             continue;
@@ -621,14 +621,50 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
     //   + number of bytes the table takes should be the byte after the table
     //   and not further than the byte after the file, which has 0-index of size.
     // It also works if there are zero section headers.
-    if (elf_header->e_shoff + sizeof(struct Secthdr) * elf_header->e_shnum > size) {
+    // TODO: format this.
+    // For future, in case we switch architectures.
+    //   Not only we need to check that UINT64 is unsigned long long,
+    //   but ... we check sizeof(UINT64) asumming ... is unsigned, meaning they are probably the same type,
+    //   if we'd calculate an offset in UINT64, so that we won't overflow if the struct field was changed...
+    assert(sizeof(unsigned long long) == sizeof(UINT64) && sizeof(UINT64) == sizeof(elf_header->e_shoff));
+    unsigned long long section_headers_size = 0;
+    if (__builtin_umulll_overflow(sizeof(struct Secthdr), elf_header->e_shnum, &section_headers_size)) {
+        // Overflow in section header size calculation.
         return -E_INVALID_EXE;
     }
+    unsigned long long section_header_past_end_offset = 0;
+    if (__builtin_uaddll_overflow(elf_header->e_shoff, section_headers_size, &section_header_past_end_offset)) {
+        // Overflow in past the end byte of section header table calculation.
+        return -E_INVALID_EXE;
+    }
+    if (section_header_past_end_offset > size) {
+        // It can be equal, section headers occupy the whole file. :)
+        //   Problems with this will be found later in the code here :)
+        return -E_INVALID_EXE;
+    }
+
     // The same for the program header table.
-    if (elf_header->e_phoff + sizeof(struct Proghdr) * elf_header->e_phnum > size) {
+    // For future, in case we switch architectures.
+    //   Not only we need to check that UINT64 is unsigned long long,
+    //   but ... we check sizeof(UINT64) asumming ... is unsigned, meaning they are probably the same type,
+    //   if we'd calculate an offset in UINT64, so that we won't overflow if the struct field was changed...
+    assert(sizeof(unsigned long long) == sizeof(UINT64) && sizeof(UINT64) == sizeof(elf_header->e_shoff));
+    unsigned long long program_headers_size = 0;
+    if (__builtin_umulll_overflow(sizeof(struct Proghdr), elf_header->e_phnum, &program_headers_size)) {
+        // Overflow in section header size calculation.
         return -E_INVALID_EXE;
     }
-    
+    unsigned long long program_header_past_end_offset = 0;
+    if (__builtin_uaddll_overflow(elf_header->e_phoff, program_headers_size, &program_header_past_end_offset)) {
+        // Overflow in past the end byte of section header table calculation.
+        return -E_INVALID_EXE;
+    }
+    if (program_header_past_end_offset > size) {
+        // It can be equal, program headers occupy the whole file. :)
+        //   Problems with this will be found later in the code here :)
+        return -E_INVALID_EXE;
+    }
+
     // UINT64 section_name_table_off = sections[elf_header->e_shstrndx].sh_offset;
 
     // Maybe we do need sections for debug information. Don't load it for now.
