@@ -373,11 +373,11 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
         // Global volatile pointers to functions have global binding and object type
         //   in elf format's symbol table. Found out by an experiment. Otherwise
         //   account for cases when it's not. Also we may make it a part of our ABI.
-        if (ELF_ST_BIND(symbol_table_entry->st_info) != 1 || ELF_ST_TYPE(symbol_table_entry->st_info) != 1) {
+        if (ELF_ST_BIND(symbol_table_entry->st_info) != STB_GLOBAL || ELF_ST_TYPE(symbol_table_entry->st_info) != STT_OBJECT) {
             continue;
         }
 
-            // Must be uninitialized (reside in .bss) in order for us to even touch
+        // Must be uninitialized (reside in .bss) in order for us to even touch
         //   it's value.
         if (symbol_va < bss_section_va_start || symbol_va >= bss_section_va_past_end) {
             continue;
