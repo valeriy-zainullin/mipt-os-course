@@ -229,19 +229,45 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
     // index.
     if (sectname_section_header->sh_type != ELF_SHT_STRTAB) {
         // No section names. Then we won't be able to find the section with the names of symbols.
-        // Then there are no symbols we know about that we can bind. Binding is done.
-        // The symbols listed in symbols table are not exactly a must to be binded, it may be a
-        // kernel symbol and we don't know if it is.
-        // In future we will have syscalls and we won't deal with this anymore.
-        return 0;
+        // There may be symbols to bind, but there's no symbol table. Fail the binding.
+        // In future we will have syscalls and we won't have to act like this anymore.
+        // We'll support having no section names.
+        return -1;
     }
 
     char const * section_names_buffer = (char const*) (binary + sectname_section_header->sh_offset);
 
-    char const * symbol_names_buffer = NULL;
+    // .bss section is PROG_NO_BITS and shows where in memory uninitialized variables
+    //   will be located. If there's no such section, we won't continue binding,
+    //   because only uninitialized memory can be preinitialized by the kernel.
+    uintptr_t bss_section_va_start = 0;
+    uintptr_t bss_section_va_past_end = 0;
+    bool found_bss = false;
     for (UINT16 section_index = 0; section_index < elf_header->e_shnum; ++section_index) {
         struct Secthdr const* section_header = &section_headers[section_index];
         // FIXME: may be not null terminated!
+        // FIXME: may be out of bounds (meaning pointer may be out of bounds of the file).
+        if (strcmp(section_names_buffer + section_header->sh_name, ".bss") == 0) {
+            // FIXME: overflows.
+            bss_section_va_start = section_header->sh_addr;
+            bss_section_va_past_end = bss_section_va_start + section_header->sh_size;
+            found_bss = true;
+            break;
+        }
+    }
+    if (!found_bss) {
+        // Can't bind. Fail the binding, because there may be symbols to bind,
+        //   but there's no .bss section.
+        // In future we will have syscalls and we won't have to act like this anymore.
+        // We'll support having no bss section (at least, state, there may be a corresponding segment).
+        return -2;
+    }
+
+    char const * symbol_names_buffer = NULL;
+    for (UINT16 section_index = 0; section_index < elf_header->e_shnum; ++section_index) {
+        struct Secthdr const* section_header = &section_headers[section_index];
+        // FIXME: may be not null terminated! Use strncmp? Is it a good solution? I suppose.
+        // FIXME: may be out of bounds.
         if (section_header->sh_type == ELF_SHT_STRTAB && strcmp(section_names_buffer + section_header->sh_name, ".strtab") == 0) {
             // load_icode checks this is fully inside of the file.
             symbol_names_buffer = (char const*) (binary + section_header->sh_offset);
@@ -250,11 +276,10 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
     }
     if (symbol_names_buffer == NULL) {
         // No symbol name table.
-        // Then there are no symbols we know about that we can bind. Binding is done.
-        // The symbols listed in symbols table are not exactly a must to be binded, it may be a
-        // kernel symbol and we don't know if it is.
-        // In future we will have syscalls and we won't deal with this anymore.
-        return 0;
+        // There may be symbols to bind, but there's no symbol table. Fail the binding.
+        // In future we will have syscalls and we won't have to act like this anymore.
+        // We'll support having no symbol table.
+        return -3;
     }
 
     struct Secthdr const* symtbl_section_header = NULL;
@@ -281,6 +306,11 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
     struct Elf64_Sym const * symbol_table_entries = (struct Elf64_Sym const *) (env->binary + symtbl_section_header->sh_offset);
     size_t num_entries = symtbl_section_header->sh_size / sizeof(struct Elf64_Sym); // Rounded down.
 
+    // I wanted to restrict the set of exported functions.
+    // It's more abstract for the program, less usages, we'll be free to change
+    //   unexported functions and what they do, even delete them.
+    // But tests require to export all functions. So we'll have table only for asm functions.
+    /*
     const struct exported_function {
         const char* user_space_fname;
         // const char* kernel_space_fname;
@@ -292,6 +322,39 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
         { "sys_exit" , (uintptr_t) sys_exit       },
     };
     static const size_t NUM_EXPORTED_FUNCTIONS = sizeof(EXPORTED_FUNCTIONS) / sizeof(struct exported_function);
+    */
+    const struct exported_function {
+        const char* user_space_fname;
+        uintptr_t kernel_code_address;
+    } ASM_EXPORTED_FUNCTIONS[] = {
+        { "sys_yield", (uintptr_t) sys_yield },
+        { "sys_exit" , (uintptr_t) sys_exit  }
+    };
+    static const size_t NUM_EXPORTED_ASM_FUNCTIONS = sizeof(ASM_EXPORTED_FUNCTIONS) / sizeof(struct exported_function);
+    
+    /* Playing this task as a real-life developer, in case we have to do binding like this.
+
+       For a symbol to be bounded by the kernel, it needs to be global uninitialized volatile pointer to a function.
+       It could checked like this: the symbol should point to .bss section (.bss section should exist, otherwise no
+       symbols are bound), we check in dwarf debugging info that type matches and it's a global variable.
+
+       Because it's possible the file doesn't have dwarf debugging info, having the symbol point inside .bss is enough
+       for us to try to find the symbol in the kernel and modify provided symbol's value. Because it's uninitialized,
+       code mustn't expect it to have a particular value anyway, in case it's not a kernel function. The kernel and OS
+       are also part of implementation from the C and C++ standards in that case. All uninitialized symbols, if
+       they don't correspond to kernel functions, are initialized to zero by the kernel.
+    */
+
+
+    /*
+      Если символ не найден, по-хорошему, мы должны привязывать туда sys_exit, но это
+      не будет проходить тесты.
+      Записывать туда 0, просто в тесте 2 есть проверка указателя на ноль, и есть вызов
+      без этого, мб тот вызов не всегда должен работать, иногда крашить, а мб там всегда
+      функция будет найдена. Тесты проходят, мб это хорошее решение, т.к. дальше будет
+      сегментация, она будет останавливать процесс, если он попытается вызвать функцию,
+      которая не была найдена. Да и syscallы будут уже к тому моменту.
+    */
 
     // Won't overflow as sizeof(struct Elf64_sym) is at least two bytes.
     for (size_t entry_idx = 0; entry_idx < num_entries; ++entry_idx) {
@@ -301,10 +364,34 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
         char const* symbol_name = symbol_names_buffer + symbol_table_entry->st_name;
         // cprintf("entry_idx = %zu, symbol_type = %u, symbol_name = %s.\n", entry_idx, (unsigned) symbol_type, symbol_name);
 
+        // We don't know if it is address or not, because the symbol table entry type (st_type)
+        // is not necesserily ST_FUNC or anything, but it has to be address, otherwise no way
+        // we can bind the value.
+        uintptr_t symbol_va = symbol_table_entry->st_value;
+        uintptr_t* symbol_value = (uintptr_t*) symbol_va; // Assuming symbol value is 8 bytes.
+
+        // Global volatile pointers to functions have global binding and object type
+        //   in elf format's symbol table. Found out by an experiment. Otherwise
+        //   account for cases when it's not. Also we may make it a part of our ABI.
+        if (ELF_ST_BIND(symbol_table_entry->st_info) != STB_GLOBAL || ELF_ST_TYPE(symbol_table_entry->st_info) != STT_OBJECT) {
+            continue;
+        }
+
+        // Must be uninitialized (reside in .bss) in order for us to even touch
+        //   it's value.
+        if (symbol_va < bss_section_va_start || symbol_va >= bss_section_va_past_end) {
+            continue;
+        }
+
         cprintf("symbol_name = %s.\n", symbol_name);
 
-        for (size_t func_index = 0; func_index < NUM_EXPORTED_FUNCTIONS; ++func_index) {
-            struct exported_function const * exported_func = &EXPORTED_FUNCTIONS[func_index];
+        // Bounding by dwarf info we'll do. Check it's [uninitialized, if possible] volatile global pointer.
+        // Global means DW_AT_external is true.
+
+        bool was_bound = false;
+
+        for (size_t func_index = 0; func_index < NUM_EXPORTED_ASM_FUNCTIONS; ++func_index) {
+            struct exported_function const * exported_func = &ASM_EXPORTED_FUNCTIONS[func_index];
 
             if (strcmp(exported_func->user_space_fname, symbol_name) != 0) {
                 continue;
@@ -316,16 +403,52 @@ bind_functions(struct Env *env, uint8_t *binary, size_t size, uintptr_t image_st
             //   we'll catch the bug in the debug build anyway. Just need to retest on it.
             assert(address != 0);
 
-            // We don't know if it is address or not, because the symbol table entry type (st_type)
-            // is not necesserily ST_FUNC or anything, but it has to be address, otherwise no way
-            // we can bind the value.
-            uintptr_t* symbol_va = (uintptr_t*) symbol_table_entry->st_value;
-
-            cprintf("Binding %s@%p to %p.\n", exported_func->user_space_fname, (void const*) address, symbol_va);
+            cprintf("Binding %s@%p to %p.\n", exported_func->user_space_fname, (void const*) address, symbol_value);
 
             // FIXME: may be not in the file (out of the file, greater than or equal to size).
-            *symbol_va = address;
+            // SUGGESTION сдача: отредактировать программу так prog1, чтобы при загрузке
+            //   в этом месте возникало обращение по невыровненому адресу и undefined
+            //   behaviour санитайзер зарепортил. И поправить тесты.
+            // Ветка lab3-suggestion будет. Объяснить, что в ней будет происходить потом в коде.
+            *symbol_value = address;
+
+            was_bound = true;
         }
+
+        if (was_bound) {
+            continue;
+        }
+
+        // Ищем функцию в отладочной информации. Ассемблерные искали отдельно, поскольку
+        //   в отладочной информации их нет. Могли бы просто таблицу с экспортируемыми
+        //   функциями сделать, но отладочную информацию мы всё равно должны использовать
+        //   по заданию.
+
+        uintptr_t kernel_code_address = find_function(symbol_name);
+        if (kernel_code_address != 0) {
+            *symbol_value = kernel_code_address;
+            continue;
+        } else {
+            // Initialize to 0.
+            *symbol_value = (uintptr_t) 0;
+        }
+    
+        // Не найдена. В таблице не обязательно только те символы, которые
+        //   нужно связать. Так что если не нашли, никаких проблем в этом нет.
+        // Но программа свалится с ошибкой, если попробует вызвать по тому указателю.
+        //   Не инициализированному, хотя пользователи могут сделать функцию,
+        //   адресом которой инициализировали бы указатели, чтобы отлавливать ошибку.
+        // Поскольку у нас пока нет защиты, всё в режиме ядра, и это нужно по заданию,
+        //   давайте все глобальные переменные -- указатели на функции, будем
+        //   инициализировать адресом sys_exit. Чтобы вызов по ним приводил к
+        //   завершению программы. Как мы определеним, что значения нет? Тип переменной
+        //   в dwarf есть, слава богу. Мы знаем, что это volatile указатель на функцию.
+        //   Сходим в исполняемый файл по адресу, если там значение за пределами
+        //   адресного пространства файла, записывыаем sys_exit. Да, теперь значения
+        //   глобальных переменных меняются, если они всё-таки были инициализированы,
+        //   но такой уж у нас будет ABI. Это только глобальные volatile указатели на
+        //   функции, у них теперь специальное значение.
+
     }
 
     // No symbols to bind. No section of type symtab found.
@@ -391,8 +514,8 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
     // FIXME: check the elf header specifies the architecture the OS running on.
 
     // Check the elf header fits into the file.
-    //   Otherwise it can have it. Also we'd access the field of the header,
-    //   we should know we won't overflow the buffer and that way won't use
+    //   We'd access the field of the header, we should know
+    //   we won't overflow the buffer and that way won't use
     //   initialized memory.
     if (sizeof(struct Elf) > size) {
         return -E_INVALID_EXE;
@@ -481,8 +604,8 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
     // Overflows are not possible here, as if an offset is greater than max value
     //   of size_t, then it is greater than size. size has type size_t, that's why.
     //   Otherwise, it would be possible.
-    // TODO: load sections that have to be loaded. // struct Secthdr const* section_headers = (struct Secthdr const*) (binary + elf_header->e_shoff);
     struct Proghdr const* program_headers = (struct Proghdr const*) (binary + elf_header->e_phoff);
+    struct Secthdr const* section_headers = (struct Secthdr const*) (binary + elf_header->e_shoff);
 
     // FIXME: check none of segments and sections overlap in virtual memory.
 
@@ -498,34 +621,51 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
     //   + number of bytes the table takes should be the byte after the table
     //   and not further than the byte after the file, which has 0-index of size.
     // It also works if there are zero section headers.
-    if (elf_header->e_shoff + sizeof(struct Secthdr) * elf_header->e_shnum > size) {
+    // TODO: format this.
+    // For future, in case we switch architectures.
+    //   Not only we need to check that UINT64 is unsigned long long,
+    //   but ... we check sizeof(UINT64) asumming ... is unsigned, meaning they are probably the same type,
+    //   if we'd calculate an offset in UINT64, so that we won't overflow if the struct field was changed...
+    assert(sizeof(unsigned long long) == sizeof(UINT64) && sizeof(UINT64) == sizeof(elf_header->e_shoff));
+    unsigned long long section_headers_size = 0;
+    if (__builtin_umulll_overflow(sizeof(struct Secthdr), elf_header->e_shnum, &section_headers_size)) {
+        // Overflow in section header size calculation.
         return -E_INVALID_EXE;
     }
-    // The same for the program header table.
-    if (elf_header->e_phoff + sizeof(struct Proghdr) * elf_header->e_phnum > size) {
+    unsigned long long section_header_past_end_offset = 0;
+    if (__builtin_uaddll_overflow(elf_header->e_shoff, section_headers_size, &section_header_past_end_offset)) {
+        // Overflow in past the end byte of section header table calculation.
         return -E_INVALID_EXE;
     }
-    
-    // UINT64 section_name_table_off = sections[elf_header->e_shstrndx].sh_offset;
-    /*
-    STATIC struct {
-    CONST CHAR8  *Name;
-    UINTN        StartOffset;
-    UINTN        EndOffset;
-    } mDebugMapping[] = {
-        {".debug_aranges",  OFFSET_OF (LOADER_PARAMS, DebugArangesStart),  OFFSET_OF (LOADER_PARAMS, DebugArangesEnd)},
-        {".debug_abbrev",   OFFSET_OF (LOADER_PARAMS, DebugAbbrevStart),   OFFSET_OF (LOADER_PARAMS, DebugAbbrevEnd)},
-        {".debug_info",     OFFSET_OF (LOADER_PARAMS, DebugInfoStart),     OFFSET_OF (LOADER_PARAMS, DebugInfoEnd)},
-        {".debug_line",     OFFSET_OF (LOADER_PARAMS, DebugLineStart),     OFFSET_OF (LOADER_PARAMS, DebugLineEnd)},
-        {".debug_str",      OFFSET_OF (LOADER_PARAMS, DebugStrStart),      OFFSET_OF (LOADER_PARAMS, DebugStrEnd)},
-        {".debug_pubnames", OFFSET_OF (LOADER_PARAMS, DebugPubnamesStart), OFFSET_OF (LOADER_PARAMS, DebugPubnamesEnd)},
-        {".debug_pubtypes", OFFSET_OF (LOADER_PARAMS, DebugPubtypesStart), OFFSET_OF (LOADER_PARAMS, DebugPubtypesEnd)},
-        {".symtab",         OFFSET_OF (LOADER_PARAMS, SymbolTableStart),   OFFSET_OF (LOADER_PARAMS, SymbolTableEnd)},
-        {".strtab",         OFFSET_OF (LOADER_PARAMS, StringTableStart),   OFFSET_OF (LOADER_PARAMS, StringTableEnd)},
-    };
+    if (section_header_past_end_offset > size) {
+        // It can be equal, section headers occupy the whole file. :)
+        //   Problems with this will be found later in the code here :)
+        return -E_INVALID_EXE;
+    }
 
-    Status = EFI_SUCCESS;
-    */
+    // The same for the program header table.
+    // For future, in case we switch architectures.
+    //   Not only we need to check that UINT64 is unsigned long long,
+    //   but ... we check sizeof(UINT64) asumming ... is unsigned, meaning they are probably the same type,
+    //   if we'd calculate an offset in UINT64, so that we won't overflow if the struct field was changed...
+    assert(sizeof(unsigned long long) == sizeof(UINT64) && sizeof(UINT64) == sizeof(elf_header->e_shoff));
+    unsigned long long program_headers_size = 0;
+    if (__builtin_umulll_overflow(sizeof(struct Proghdr), elf_header->e_phnum, &program_headers_size)) {
+        // Overflow in section header size calculation.
+        return -E_INVALID_EXE;
+    }
+    unsigned long long program_header_past_end_offset = 0;
+    if (__builtin_uaddll_overflow(elf_header->e_phoff, program_headers_size, &program_header_past_end_offset)) {
+        // Overflow in past the end byte of section header table calculation.
+        return -E_INVALID_EXE;
+    }
+    if (program_header_past_end_offset > size) {
+        // It can be equal, program headers occupy the whole file. :)
+        //   Problems with this will be found later in the code here :)
+        return -E_INVALID_EXE;
+    }
+
+    // UINT64 section_name_table_off = sections[elf_header->e_shstrndx].sh_offset;
 
     // Maybe we do need sections for debug information. Don't load it for now.
     // Implement in case needed. Look at bootloader.
@@ -559,16 +699,22 @@ load_icode(struct Env *env, uint8_t *binary, size_t size/*, size_t* addr_space_s
 
     // Also, we have to load sections with sh_addr != 0.
     // https://refspecs.linuxfoundation.org/elf/gabi4+/ch4.sheader.html
-    for (UINT16 segment_index = 0; segment_index < elf_header->e_phnum; ++segment_index) {
-        struct Proghdr const* program_header = &program_headers[segment_index];
-        if (program_header->p_type == PT_LOAD && program_header->p_filesz > 0) {
-            // Check the segment is fully in file.
+    for (UINT16 section_index = 0; section_index < elf_header->e_shnum; ++section_index) {
+        struct Secthdr const* section_header = &section_headers[section_index];
+        // This section is not present in the file anyways.
+        //   I think it's not intended to be created in virtual memory.
+        static const UINT32 ELF_SHT_NOBITS = 0x8;
+        if (section_header->sh_type == ELF_SHT_NOBITS) {
+            continue;
+        }
+        if (section_header->sh_addr != 0) {
+            // Check the section is fully in file.
             //   To not use uninitialized memory.
             // FIXME: check for overflows.
-            if (program_header->p_offset + program_header->p_filesz > size) {
+            if (section_header->sh_offset + section_header->sh_size > size) {
                 return -E_INVALID_EXE;
             }
-            memcpy((void*) (size_t) program_header->p_pa, (void const*) ((char const*) binary + program_header->p_offset), program_header->p_filesz);
+            memcpy((void*) (size_t) section_header->sh_addr, (void const*) ((char const*) binary + section_header->sh_offset), section_header->sh_size);
         }
     }
 

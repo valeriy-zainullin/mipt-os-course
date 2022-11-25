@@ -515,6 +515,24 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
         count = dwarf_entry_len(pubnames_entry, &len);
         pubnames_entry += count;
 
+        // Pubnames (.debug_pubnames) consist of entries each entry corresponds to a compilation unit.
+        //   Each entry starts with it's size, number of bytes this compilation unit entry takes.
+        //   Then dwarf version. After that there's compilation unit offset in debug_info section,
+        //   which is main section for debugging information. After that there's name table size.
+        //   Each name entry starts with function offset in the compilation unit in the
+        //   .debug_info section and after that null-terminated function name follows.
+        // Debug info consists of entries corresponding to compilation units. At the start
+        //   of entry there are dwarf version and other information (you can see with
+        //   objdump -Wi). Then there are subentries. Each entry lists all of different
+        //   entities in a compilation unit. Including
+        //   functions. Each entry layout is stored in .debug_abbrev section.
+        //   At the start of the entity entry there's abbrev_code. We need to find
+        //   abbrev with such code in .debug_abbrev. It's done to reduce size, because
+        //   we don't store names and forms for each entity entry, instead we store
+        //   format for every entity. Should pay off for very big industrial projects,
+        //   where there are millions of lines of code.
+        // Abbrev (.debug_abbrev) consists
+
         while (pubnames_entry < pubnames_entry_end) {
             func_offset = get_unaligned(pubnames_entry, uint32_t);
             pubnames_entry += sizeof(uint32_t);
@@ -556,8 +574,6 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
                 entry += dwarf_read_uleb128(entry, &abbrev_code);
                 uint64_t name = 0, form = 0, tag = 0;
 
-                // TODO: figure out what is abbreviation.
-
                 /* Find abbreviation in abbrev section */
                 /* UNSAFE Needs to be replaced */
                 while (abbrev_entry < addrs->abbrev_end) {
@@ -586,6 +602,7 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
                      * Attribute value can be obtained using dwarf_read_abbrev_entry function. */
                     uintptr_t low_pc = 0;
                     // LAB 3: Your code here:
+                    // cprintf("address_by_fname: at attributes.\n");
                     // Similar to the code from function_by_info, we do what is said above with
                     //   the inspiration from there.
                     // TODO: what is in abbrev entry?
@@ -597,6 +614,7 @@ address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *
                         // cprintf("entry offset = %zx.\n", (size_t) (entry - addrs->info_begin));
                         if (name == DW_AT_low_pc) {
                             entry += dwarf_read_abbrev_entry(entry, form, &low_pc, sizeof(low_pc), address_size);
+                            // cprintf("address_by_fname: at DW_AT_low_pc.\n");
                             *offset = low_pc;
                             return 0;
                         } else {
