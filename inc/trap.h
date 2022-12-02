@@ -29,6 +29,13 @@
 #define T_SYSCALL 48  /* system call */
 #define T_DEFAULT 500 /* catchall */
 
+// The first 0x20 entries
+//   are CPU, IRQ and BIOS.
+//   Our interrupts (that we defined) should
+//   not overlap with them and they actually fall into DOS section,
+//   which is suitable, because DOS doesn't run
+//   in parallel.
+// https://helppc.netcore2k.net/interrupt/int-table
 #define IRQ_OFFSET 32 /* IRQ 0 corresponds to int IRQ_OFFSET */
 
 /* Hardware IRQ numbers. We receive these as (IRQ_OFFSET+IRQ_WHATEVER) */

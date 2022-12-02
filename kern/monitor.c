@@ -9,9 +9,10 @@
 #include <inc/x86.h>
 
 #include <kern/console.h>
-#include <kern/monitor.h>
-#include <kern/kdebug.h>
 #include <kern/env.h>
+#include <kern/kclock.h>
+#include <kern/kdebug.h>
+#include <kern/monitor.h>
 #include <kern/trap.h>
 
 #define WHITESPACE "\t\r\n "
@@ -35,7 +36,7 @@ static struct Command commands[] = {
         {"help", "Display this list of commands", mon_help},
         {"kerninfo", "Display information about the kernel", mon_kerninfo},
         {"backtrace", "Print stack backtrace", mon_backtrace},
-        {"hello", "Greets the user", mon_hello}
+        {"hello", "Greet the user", mon_hello},
         {"dumpcmos", "Print CMOS contents", mon_dumpcmos},
 };
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -102,6 +103,19 @@ mon_dumpcmos(int argc, char **argv, struct Trapframe *tf) {
     // Make sure you understand the values read.
     // Hint: Use cmos_read8()/cmos_write8() functions.
     // LAB 4: Your code here
+
+    static const uint32_t CMOS_MEMORY_SIZE = 128;
+    static const uint32_t BYTES_PER_LINE = 16;
+
+    for (uint32_t address = 0; address < CMOS_MEMORY_SIZE; address += BYTES_PER_LINE) {
+        cprintf("%02x:", address);
+
+        for (uint8_t offset = 0; offset < BYTES_PER_LINE; ++offset) {
+            cprintf(" %02X", cmos_read8((uint8_t) (address + offset)));
+        }
+
+        cprintf("\n");
+    }
 
     return 0;
 }
