@@ -16,6 +16,7 @@ clock_thdlr:
     # Set trap code for trapframe
     movl $(IRQ_OFFSET + IRQ_CLOCK), 136(%rsp)
     call trap
+    // Won't reach this place.
     jmp .
 
 #endif

@@ -70,8 +70,9 @@ save_trapframe:
 .globl sys_yield
 .type  sys_yield, @function
 sys_yield:
+    cli # Disable (mask) maskable interrupts
     call save_trapframe_syscall
-    # call select_kernel_stack # Doesn't work for some reason, breaks the code.
+    # call select_kernel_stack # Doesn't work, becuase we mess up the task's trapframe, which was saved on the stack. We need to work around that.
     call csys_yield
     jmp .
 
@@ -79,7 +80,7 @@ sys_yield:
 .globl sys_exit
 .type  sys_exit, @function
 sys_exit:
-    cli
+    cli # Disable (mask) maskable interrupts
     call save_trapframe_syscall
     call select_kernel_stack
     call csys_exit
