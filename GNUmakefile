@@ -145,8 +145,8 @@ ifdef KUBSAN
 CFLAGS += -DSAN_ENABLE_KUBSAN
 
 KERN_SAN_CFLAGS += -fsanitize=undefined \
-	-fsanitize=implicit-integer-truncation \
-	-fno-sanitize=function \
+#	-fsanitize=implicit-integer-truncation \
+#	-fno-sanitize=function \
 	-fno-sanitize=vptr \
 	-fno-sanitize=return
 

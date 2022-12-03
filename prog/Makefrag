@@ -2,21 +2,34 @@ OBJDIRS += prog
 
 PROGLIBS = jos
 
-.SECONDARY: $(patsubst %, %.ld, $(KERN_BINFILES)) $(patsubst %_out, %, $(KERN_BINFILES))
+.SECONDARY: $(patsubst %, %.ld, $(KERN_BINFILES)) $(patsubst %_out, %, $(KERN_BINFILES)) 
+
+# Treat these files as not intermediate, they are considered intermediate by default.
+#   Needed for our test.
+# This doesn't work for some reason.
+# .NOTINTERMEDIATE: $(patsubst $(OBJDIR)/prog/%.ld, prog/%.c, $(wildcard prog/*.c))
+# This does for some reason.
+.PRECIOUS: %.ld $(OBJDIR)/prog/%.ld
+# This doesn't work either.
+#.NOTINTERMEDIATE: %.ld $(OBJDIR)/prog/%.ld
 
 $(OBJDIR)/prog/%.o: prog/%.c $(OBJDIR)/.vars.USER_CFLAGS
 	@echo + cc[PROG] $<
 	@mkdir -p $(@D)
 	$(V)$(CC) $(USER_CFLAGS) -c -o $@ $<
 
+$(OBJDIR)/prog/bindmepls.o: prog/bindmepls.S
+	@mkdir -p $(@D)
+	$(V)$(CC) -c -o $@ $<
+
 $(OBJDIR)/prog/%.ld: prog/prog.ld
 	@echo + GEN: $@
 	@mkdir -p $(@D)
 	@$(PERL) -e 'sub gf {opendir D, $$_[0]; @f=map{(split "/", $$_)[-1]}grep{m/$$_[1]/}readdir D; closedir D; @f} @ld=gf("$(@D)", qr/\.ld$$/); %c=map{$$_ => 1}gf("prog", qr/\.c$$/); @ld=grep{$$c{$$_=~s/\.ld/.c/r}}@ld; $$n=$$#ld; $$addr=sprintf("0x%x", 0x1000000+$$n*0x10000); while(<>){s/#ADDRESS#/$$addr/; print;};' $< > $@
 
-$(OBJDIR)/prog/%: $(OBJDIR)/prog/%.o $(OBJDIR)/prog/%.ld $(OBJDIR)/lib/entry.o $(PROGLIBS:%=$(OBJDIR)/lib/lib%.a)
+$(OBJDIR)/prog/%: $(OBJDIR)/prog/%.o $(OBJDIR)/prog/%.ld $(OBJDIR)/lib/entry.o $(PROGLIBS:%=$(OBJDIR)/lib/lib%.a) $(OBJDIR)/prog/bindmepls.o
 	@echo + ld $@
-	$(V)$(LD) -o $@ -T $@.ld $(LDFLAGS) -nostdlib $(OBJDIR)/lib/entry.o $@.o -L$(OBJDIR)/lib $(PROGLIBS:%=-l%) $(GCC_LIB)
+	$(V)$(LD) -o $@ -T $@.ld $(LDFLAGS) -nostdlib $(OBJDIR)/lib/entry.o $@.o $(OBJDIR)/prog/bindmepls.o -L$(OBJDIR)/lib $(PROGLIBS:%=-l%) $(GCC_LIB)
 	$(V)$(OBJDUMP) -S $@ > $@.asm
 	$(V)$(NM) -n $@ > $@.sym
 
