@@ -28,9 +28,9 @@ int mon_kerninfo(int argc, char **argv, struct Trapframe *tf);
 int mon_backtrace(int argc, char **argv, struct Trapframe *tf);
 int mon_hello(int argc, char **argv, struct Trapframe *tf);
 int mon_dumpcmos(int argc, char **argv, struct Trapframe *tf);
-int mon_start(int argc, char **argv, struct Trapframe *tf);
-int mon_stop(int argc, char **argv, struct Trapframe *tf);
-int mon_frequency(int argc, char **argv, struct Trapframe *tf);
+int mon_timer_start(int argc, char **argv, struct Trapframe *tf);
+int mon_timer_stop(int argc, char **argv, struct Trapframe *tf);
+int mon_timer_frequency(int argc, char **argv, struct Trapframe *tf);
 
 struct Command {
     const char *name;
@@ -40,11 +40,14 @@ struct Command {
 };
 
 static struct Command commands[] = {
-        {"help", "Display this list of commands", mon_help},
-        {"kerninfo", "Display information about the kernel", mon_kerninfo},
-        {"backtrace", "Print stack backtrace", mon_backtrace},
-        {"hello", "Greet the user", mon_hello},
-        {"dumpcmos", "Print CMOS contents", mon_dumpcmos},
+    {"help", "Display this list of commands", mon_help},
+    {"kerninfo", "Display information about the kernel", mon_kerninfo},
+    {"backtrace", "Print stack backtrace", mon_backtrace},
+    {"hello", "Greet the user", mon_hello},
+    {"dumpcmos", "Print CMOS contents", mon_dumpcmos},
+    {"timer_start", "Starts timer ...", mon_timer_start},
+    {"timer_stop", "Starts timer ...", mon_timer_stop},
+    {"timer_freq", "Starts timer ...", mon_timer_frequency},
 };
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
 
@@ -127,8 +130,72 @@ mon_dumpcmos(int argc, char **argv, struct Trapframe *tf) {
     return 0;
 }
 
-/* Implement timer_start (mon_start), timer_stop (mon_stop), timer_freq (mon_frequency) commands. */
+/* Implement timer_start (mon_timer_start), timer_stop (mon_timer_stop), timer_freq (mon_timer_frequency) commands. */
 // LAB 5: Your code here:
+
+static bool
+mon_validate_timer_name(char* command, char* timer) {
+    for (size_t i = 0; i < MAX_TIMERS; ++i) {
+        if (strcmp(timertab[i].timer_name, timer) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void
+mon_timer_print_cmd_usage(char* command) {
+    cprintf("Format: %s [timer name]\n", command);
+    cprintf("Timer name is one of ");
+    for (size_t i = 0; i < MAX_TIMERS; ++i) {
+        cprintf("%s", timertab[i].timer_name);
+        if (i == MAX_TIMERS - 1) {
+            cprintf(".\n");
+        } else {
+            cprintf(", ");
+        }
+    }
+}
+
+int
+mon_timer_start(int argc, char **argv, struct Trapframe *tf) {
+    (void) tf;
+
+    if (argc != 2 || !mon_validate_timer_name(argv[0], argv[1])) {
+        mon_timer_print_cmd_usage(argv[0]);
+        return 0;
+    }
+
+    // TODO: account timer can be already running.
+
+    timer_start(argv[1]);
+
+    return 0;
+}
+
+int
+mon_timer_stop(int argc, char **argv, struct Trapframe *tf) {
+    (void) tf;
+
+    timer_stop();
+
+    return 0;
+}
+
+int
+mon_timer_frequency(int argc, char **argv, struct Trapframe *tf) {
+    (void) tf;
+
+    if (argc != 2 || !mon_validate_timer_name(argv[0], argv[1])) {
+        mon_timer_print_cmd_usage(argv[0]);
+        return 0;
+    }
+
+    timer_cpu_frequency(argv[1]);
+
+    return 0;
+}
 
 /* Kernel monitor command interpreter */
 

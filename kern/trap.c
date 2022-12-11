@@ -103,6 +103,19 @@ trap_init(void) {
 
     // LAB 5: Your code here
 
+    // clock_thdlr is already set up. It'll be used for hpet0 in
+    //   legacy replacement mode (because they share IRQs).
+
+    // If you are new, GD_KT means this code will run in kernel mode.
+    //   We provide a segment selector for cs.
+    // And it also defines what mode the processor will be in (long
+    //   mode or compatibility mode), because some regions of memory
+    //   may countain code dedicated to run in compatibility mode and
+    //   we'd easily switch between modes, as it's implemented in
+    //   modern operating systems.
+    extern void timer_thdlr();
+    idt[IRQ_OFFSET + IRQ_TIMER] = GATE(0, GD_KT, &timer_thdlr, 0);
+
     /* Per-CPU setup */
     trap_init_percpu();
 }
@@ -219,9 +232,11 @@ trap_dispatch(struct Trapframe *tf) {
         return;
     case IRQ_OFFSET + IRQ_TIMER:
     case IRQ_OFFSET + IRQ_CLOCK:
-        // LAB 5: Your code here
         // LAB 4: Your code here
-        timer_rtc.handle_interrupts();
+        // Lab 4 would have rtc_timer_pic_handle(); here.
+        // LAB 5: Your code here
+        timer_for_schedule->handle_interrupts();
+        sched_yield();
         return;
     default:
         print_trapframe(tf);
