@@ -13,10 +13,10 @@
 #define RTC_SET_NEW_RATE(input, rate) (RTC_NON_RATE_MASK(input) | rate)
 #define RTC_500MS_RATE                0x0F
 
-#define RTC_AREG 0x0A
-#define RTC_BREG 0x0B
-#define RTC_CREG 0x0C
-#define RTC_DREG 0x0D
+#define RTC_AREG 0x0A // 10
+#define RTC_BREG 0x0B // 11
+#define RTC_CREG 0x0C // 12
+#define RTC_DREG 0x0D // 13
 
 #define RTC_SEC  0x00
 #define RTC_MIN  0x02

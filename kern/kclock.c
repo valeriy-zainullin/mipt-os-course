@@ -22,12 +22,8 @@ cmos_read8(uint8_t reg) {
     /* MC146818A controller */
     // LAB 4: Your code here
 
-    // Do we have to use nmi_disable() here?
-    //   Because we have nmi_enable and we
-    //   wouldn't enable non-masked interrupts
-    //   before this code, this code may
-    //   need protection, not allowing
-    //   something else to execute.
+    nmi_disable();
+
 
     outb(CMOS_CMD, reg);
     uint8_t res = inb(CMOS_DATA);
@@ -72,6 +68,37 @@ cmos_write8(uint8_t reg, uint8_t value) {
     //   know what time it takes for cells to discharge
     //   due to charge leaks.
 
+    // CMOS is critical, because it's read on every startup.
+    //   And if there's an NMI (which usually signals a hardware failure),
+    //   we could hang in between writing to index port and reading value.
+    //   CMOS expects a read or a write to the CMOS_DATA port or it'll go
+    //   to an undefined state ("https://wiki.osdev.org/Non_Maskable_Interrupt#Usage").
+    //   And it's not reset on a reboot! We better to ignore the NMI for
+    //   that matter, it could make someone troubles with their pc and
+    //   fixing it.
+    // Also, maybe it doesn't ignore the NMI, but rather delays it? There
+    //   shouldn't be any NMI's on the processor this code runs on. Also,
+    //   we have to disable other interrupts while this code runs, to not
+    //   get a task switch at least. Because that would delay the read
+    //   and also we may not return from the task switch in case there's
+    //   a failure.
+    nmi_disable();
+
+    // Assert in debug builds interrupts are disabled.
+    // assert((read_rflags() & FL_IF) == 0);
+    // Can't add this assert, but I'd like to. This code
+    //   may be called with interrupts on, but early in
+    //   init stage. There won't be any scheduling going
+    //   on..
+    // TODO: We should instead save the interrupt flag
+    //   and then restore it back to it's previous value.
+    //   And after that add a comment with the reason why
+    //   (basically, we don't allow a task switch appear
+    //   in this area)
+    // Consider multiprocessor system should not halt other processors,
+    //   but signal them to halt on their own will, when they are done.
+    //   That could break this place too..
+
     outb(CMOS_CMD, reg);
     outb(CMOS_DATA, value);
 
@@ -106,10 +133,6 @@ rtc_timer_pic_handle(void) {
     pic_send_eoi(IRQ_CLOCK);
 }
 
-static const uint8_t RTC_REG_A = 10;
-static const uint8_t RTC_REG_B = 11;
-static const uint8_t RTC_REG_C = 12;
-
 struct Timer timer_rtc = {
         .timer_name = "rtc",
         .timer_init = rtc_timer_init,
@@ -127,16 +150,16 @@ rtc_timer_init(void) {
     static const uint8_t RTC_FREQUENCY_BIT_MASK = 0xF;
     static const uint8_t RTC_HALF_SECOND_PERIOD_RATE_MASK = 0xF; // For 2hz frequency we should set all bits to ones. 1111 for the low bits of reg A.
 
-    value = cmos_read8(RTC_REG_A);
+    value = cmos_read8(RTC_AREG);
     value &= ~RTC_FREQUENCY_BIT_MASK;
     value |= RTC_HALF_SECOND_PERIOD_RATE_MASK;
-    cmos_write8(RTC_REG_A, value);
+    cmos_write8(RTC_AREG, value);
     // cmos_write8(RTC_REG_A, (cmos_read8(RTC_REG_A) & 0xF0) | 0x0F);
 
     // Enable periodic interrupts (PIE -- periodic interrupt enable).
-    cmos_read8(RTC_REG_B);
+    cmos_read8(RTC_BREG);
     value |= RTC_PIE;
-    cmos_write8(RTC_REG_B, value);
+    cmos_write8(RTC_BREG, value);
 }
 
 uint8_t
@@ -144,5 +167,5 @@ rtc_check_status(void) {
     // LAB 4: Your code here
     // (use cmos_read8)
 
-    return cmos_read8(RTC_REG_C);
+    return cmos_read8(RTC_CREG);
 }

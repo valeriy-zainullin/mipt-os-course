@@ -72,8 +72,51 @@ acpi_enable(void) {
         ;
 }
 
+// Some people may think comments are bad, things to read.
+//   But I actually try to explain stuff there. Others will
+//   find it useful, someone cared that they'll understand
+//   what's going on and why some decisions were made in
+//   the past, they'll be able to make dicisions in future.
+//   These comments may be the reason they'll get what's
+//   going on also. It's alright to skip reading comments
+//   if needed.
+
+static bool
+acpi_verify_sdt_header(ACPISDTHeader const* sdt_header, char const* signature) {
+    uint8_t checksum = 0;
+
+    // Length is total size of the header. For checksum we have to sum the whole
+    //   table. Header is included into Length.
+    assert(sdt_header->Length >= sizeof(ACPISDTHeader));
+    for (size_t offset = 0; offset < sdt_header->Length; ++offset) {
+        uint8_t const * byte_ptr = (uint8_t const *) sdt_header + offset;
+        uint8_t byte = *byte_ptr;
+        checksum += byte;
+    }
+
+    // If SDT header is invalid, note this in log.
+    // No corruption happened yet, so it's not an assert, if
+    //   the service who requested the table didn't get it, it
+    //   should panic on it's own, in case needed.
+    if (checksum != 0) {
+        warn("sdt header's checksum is invalid: got 0x%02x, expected 0x00.", (unsigned int) checksum);
+        return false;
+    }
+    if (signature != NULL) {
+        if (strncmp(sdt_header->Signature, signature, sizeof(sdt_header->Signature)) != 0) {
+            char header_signature[sizeof(sdt_header->Signature) / sizeof(char) + 1] = {0};
+            memcpy(header_signature, sdt_header->Signature, sizeof(sdt_header->Signature));
+            warn("sdt header's signature is invalid: got \"%s\", expected \"%s\".", header_signature, signature);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// TODO: use mmio_map_region, mmio_remap_last_region
 static void *
-acpi_find_table(const char *sign) {
+acpi_find_table(const char *signature) {
     /*
      * This function performs lookup of ACPI table by its signature
      * and returns valid pointer to the table mapped somewhere.
@@ -89,6 +132,74 @@ acpi_find_table(const char *sign) {
 
     // LAB 5: Your code here
 
+    RSDP* rsdp = (RSDP*) uefi_lp->ACPIRoot;
+    // JOS assumes it's not ACPI 1.0 in the structure typedef.
+    // And we later assume it has extended checksum.
+    assert(rsdp->Revision >= 2);
+
+    uint8_t checksum = 0;
+    for (size_t offset = 0; offset < offsetof(RSDP, Length); ++offset) {
+        uint8_t* byte_ptr = (uint8_t*) rsdp + offset;
+        uint8_t byte = *byte_ptr;
+        checksum += byte;
+    }
+    if (checksum != 0) {
+        return NULL;
+    }
+
+    uint8_t extended_checksum = 0;
+    for (uint8_t offset = 0; offset < sizeof(RSDP) - sizeof(rsdp->reserved); ++offset) {
+        uint8_t* byte_ptr = (uint8_t*) rsdp + offset;
+        uint8_t byte = *byte_ptr;
+        extended_checksum += byte;
+    }
+    if (extended_checksum != 0) {
+        return NULL;
+    }
+
+    // Check signature.
+    if (strncmp(rsdp->Signature, "RSD PTR ", 8) != 0) {
+        return NULL;
+    }
+
+    // Both rsdt and xsdt are present (we expect acpi 2.0 and higher),
+    //   we should pick xsdt, even in compatibility mode (which is not
+    //   our case). We'd have to cast xsdt address to (uint32_t) and
+    //   read xsdt.
+    // We assume this is true. Although it's not used in the code later.
+    // Identify hardware that doesn't conform to this in debug builds.
+    // If that happens, write it here and make it a warning in log.
+    // Such hardware could have two copies of xsdt in different places.
+    assert((uint32_t) rsdp->XsdtAddress == rsdp->XsdtAddress);
+
+    cprintf("1\n");
+
+    if (!acpi_verify_sdt_header((ACPISDTHeader const*) rsdp->XsdtAddress, "XSDT")) {
+        return NULL;
+    }
+    
+    XSDT* xsdt = (XSDT*) rsdp->XsdtAddress;
+
+    size_t num_tables = (xsdt->h.Length - sizeof(xsdt->h)) / sizeof(uint64_t);
+    for (size_t i = 0; i < num_tables; ++i) {
+        uint64_t table_address = xsdt->PointerToOtherSDT[i];
+
+        ACPISDTHeader* sdt_header = (ACPISDTHeader*) table_address;
+        if (strncmp(sdt_header->Signature, signature, sizeof(sdt_header->Signature)) != 0) {
+            continue;
+        }
+
+        // Signature is verified already :)
+        if (!acpi_verify_sdt_header(sdt_header, NULL)) {
+            // Maybe there's another table with the right checksum?
+            //   Continue the loop, but it shouldn't be there, it's unlikely.
+            //   Maybe it's even out of spec.
+            continue;
+        }
+
+        return (void*) table_address;
+    }
+
     return NULL;
 }
 
@@ -100,7 +211,14 @@ get_fadt(void) {
     // HINT: ACPI table signatures are
     //       not always as their names
 
-    static FADT *kfadt;
+    static FADT *kfadt = NULL;
+    if (kfadt == NULL) {
+        kfadt = acpi_find_table("FACP");
+    }
+
+    if (kfadt == NULL) {
+        panic("FADT acpi table wasn't found.");
+    }
 
     return kfadt;
 }
@@ -111,7 +229,35 @@ get_hpet(void) {
     // LAB 5: Your code here
     // (use acpi_find_table)
 
-    static HPET *khpet;
+    static HPET *khpet = NULL;
+    if (khpet == NULL) {
+        khpet = acpi_find_table("HPET");
+    }
+
+    if (khpet == NULL) {
+        panic("HPET acpi table wasn't found.");
+    }
+
+    // From hpet spec:
+    //   This indicates which revision of the function is implemented.
+    //   The value must NOT be 00h.
+    if (khpet->hardware_rev_id == 0) {
+        panic("HPET hardware rev id is zero.");
+    }
+
+    // From hpet spec:
+    //   This bit is a 0 to indicate that the main counter is 32 bits
+    //   wide (and cannot operate in 64-bit mode).
+    if (khpet->counter_size == 0) {
+        panic("HPET main counter cannot operate in 64-bit mode.");
+    }
+
+    // From hpet spec:
+    //   LegacyReplacement Route Capable: If this bit is a 1, it indicates that the
+    //   hardware supports the LegacyReplacement Interrupt Route option.
+    if (khpet->legacy_replacement != 1) {
+        panic("HPET doesn't support legacy relacement interrupt route.");
+    }
 
     return khpet;
 }
@@ -161,7 +307,7 @@ static uint64_t hpetFemto = 0;
 /* HPET timer frequency */
 static uint64_t hpetFreq = 0;
 
-/* HPET timer initialisation */
+/* HPET timer initialization */
 void
 hpet_init() {
     if (hpetReg == NULL) {
@@ -214,11 +360,46 @@ void
 hpet_enable_interrupts_tim0(void) {
     // LAB 5: Your code here
 
+    // fixme: finish this function with comments what lines do, for some lines also why.
+
+    // 
+    hpetReg->MAIN_CNT = 0;
+
+    // Enable legacy replacement mode.
+    hpetReg->GEN_CONF |= HPET_LEG_RT_CNF;
+
+    // TODO: do we need to zero-out previous value?
+    hpetReg->TIM0_CONF |= HPET_TN_TYPE_CNF;
+    hpetReg->TIM0_CONF |= HPET_TN_INT_ENB_CNF;
+    hpetReg->TIM0_CONF |= HPET_TN_VAL_SET_CNF;
+    hpetReg->TIM0_COMP = (hpetFemto / (hpetReg->GCAP_ID >> 32));
+
+    hpetReg->GEN_CONF |= HPET_ENABLE_CNF;
+
+    pic_irq_unmask(IRQ_TIMER);
 }
 
 void
 hpet_enable_interrupts_tim1(void) {
     // LAB 5: Your code here
+
+    // fixme: finish this function with comments what lines do, for some lines also why.
+
+    // 
+    hpetReg->MAIN_CNT = 0;
+
+    // Enable legacy replacement mode.
+    hpetReg->GEN_CONF |= HPET_LEG_RT_CNF;
+
+    // TODO: do we need to zero-out previous value?
+    hpetReg->TIM0_CONF |= HPET_TN_TYPE_CNF;
+    hpetReg->TIM0_CONF |= HPET_TN_INT_ENB_CNF;
+    hpetReg->TIM0_CONF |= HPET_TN_VAL_SET_CNF;
+    hpetReg->TIM1_COMP = 3 * (hpetFemto / (hpetReg->GCAP_ID >> 32)) / 2;
+
+    hpetReg->GEN_CONF |= HPET_ENABLE_CNF;
+
+    pic_irq_unmask(IRQ_CLOCK);
 }
 
 void
@@ -236,9 +417,32 @@ hpet_handle_interrupts_tim1(void) {
  * about pause instruction. */
 uint64_t
 hpet_cpu_frequency(void) {
-    static uint64_t cpu_freq;
+    static uint64_t cpu_freq = 0;
 
     // LAB 5: Your code here
+
+    if (cpu_freq != 0) {
+        return cpu_freq;
+    }
+
+    uint64_t hpet_counter_start = hpet_get_main_cnt();
+    uint64_t tsc_start = read_tsc();
+
+    for (int i = 0; i < 10000; ++i) {
+        asm volatile("pause");
+    }
+
+    uint64_t hpet_counter_end = hpet_get_main_cnt();
+    uint64_t tsc_end = read_tsc();
+
+    // TODO: clarify why this always holds. Related to range
+    //   of counter values, won't overflow for 30 years at
+    //   least :)
+    assert(hpet_counter_start <= hpet_counter_end);
+    uint64_t hpet_counter_diff = hpet_counter_end - hpet_counter_start;
+    uint64_t tsc_diff = tsc_end - tsc_start; // TODO: Can this overflow? If not, assert and explain why.
+
+    cpu_freq = tsc_diff * hpetFreq / hpet_counter_diff;
 
     return cpu_freq;
 }
@@ -254,9 +458,46 @@ pmtimer_get_timeval(void) {
  *      can be 24-bit or 32-bit. */
 uint64_t
 pmtimer_cpu_frequency(void) {
-    static uint64_t cpu_freq;
+    static uint64_t cpu_freq = 0;
 
     // LAB 5: Your code here
+
+    if (cpu_freq != 0) {
+        return cpu_freq;
+    }
+
+    uint64_t pm_counter_start = pmtimer_get_timeval();
+    uint64_t tsc_start = read_tsc();
+
+    for (int i = 0; i < 10000; ++i) {
+        asm volatile("pause");
+    }
+
+    uint64_t pm_counter_end = pmtimer_get_timeval();
+    uint64_t tsc_end = read_tsc();
+
+    uint64_t pm_counter_diff = 0;
+    uint64_t tsc_diff = tsc_end - tsc_start; // TODO: Can this overflow? If not, assert and explain why.
+
+    // If counter overflows, we don't know what timer
+    //   it would be. We know that for 24-bit timer
+    //   the difference is also 24-bit, otherwise
+    //   it's 32-bit timer for sure. But if
+    //   difference fits into 24 bits, we don't know
+    //   if timer is 24 bit.
+    if (pm_counter_start <= pm_counter_end) {
+        pm_counter_diff = pm_counter_end - pm_counter_start;
+    } else if (pm_counter_start - pm_counter_end > ((1u << 24) - 1u)) {
+        // Surely 32-bit timer.
+        // We don't know how many times it overflown though. Assume it did so once.
+        pm_counter_diff = UINT32_MAX - pm_counter_start + pm_counter_end;
+    } else {
+        // Might have also been 32-bit timer..
+        //   But we assume it's 24-bit.
+        pm_counter_diff = (1u << 24) - pm_counter_start + pm_counter_end;
+    }
+
+    cpu_freq = tsc_diff * PM_FREQ / pm_counter_diff;
 
     return cpu_freq;
 }
