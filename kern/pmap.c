@@ -83,6 +83,10 @@ list_init(struct List *list) {
 inline static void __attribute__((always_inline))
 list_append(struct List *list, struct List *new) {
     // LAB 6: Your code here
+    new->prev = list;
+    new->next = list->next;
+    new->prev->next = new;
+    new->next->prev = new;
 }
 
 /*
@@ -92,7 +96,12 @@ list_append(struct List *list, struct List *new) {
 inline static struct List *__attribute__((always_inline))
 list_del(struct List *list) {
     // LAB 6: Your code here.
-
+    // Если единственный элемент в списке, то код хоть и будет странным, правильно отработает.
+    //   Но удалять всё-таки запретим, поскольку нового списка по факту создать не удастся.
+    assert(list->prev != list);
+    list->prev->next = list->next;
+    list->next->prev = list->prev;
+    list_init(list);
     return list;
 }
 
@@ -174,7 +183,33 @@ alloc_child(struct Page *parent, bool right) {
 
     // LAB 6: Your code here
 
-    struct Page *new = NULL;
+    struct Page *new = alloc_descriptor(parent->state);
+
+    // Поддержали ссылку на родителя, у нас же дерево.
+    new->parent = parent;
+
+    if (parent->refc == 0) {
+        // TODO: Это, получается, родитель или ещё не присвоен в дерево, или удален уже? Что это значит?
+        new->refc = 0;
+    } else {
+        // Окей, на нас ссылается родитель.
+        new->refc = 1;
+    }
+
+    // Возможно, это вот та фигня типа page directory, page table, page... Классы -- это они.
+    // Но в любом случае тут класс соответствует высоте узла.
+    new->class = parent->class - 1;
+
+    if (right) {
+        // TODO: почему мы здесь сдвигаем на столько, а не делим на 2? Если узел отвечает за правую половину отрезка памяти.
+        // Получается, у классов узлов высоты 0 размер 4096. А если подняться выше, 8192 и т.д.
+        // Наверно, это размер одной страницы.
+        new->addr = parent->addr + (CLASS_SIZE(new_class) >> CLASS_BASE);
+        parent->right = new;
+    } else {
+        new->addr = parent->addr;
+        parent->left = new;
+    }
 
     return new;
 }
@@ -244,6 +279,11 @@ static void
 page_ref(struct Page *node) {
     if (!node) return;
     if (!node->refc++) {
+        // Если узел ещё не удален, но ссылок нет, то прежде чем увеличивать его счетчик, пересоздадим его.
+        // Рекурсивно увеличим счетчики детям. Для этого у нас в list_init для parent с
+        //   количеством ссылок 0 для детей количество ссылок 0. Правда, зачем их
+        //   рекурсивно их проходить здесь, мы же их рекурсивно прошли при пересоздании? Или мы
+        //   при удалении их не удаляем?
         list_del((struct List *)node);
         list_init((struct List *)node);
         page_ref(node->left);
@@ -327,6 +367,21 @@ attach_region(uintptr_t start, uintptr_t end, enum PageState type) {
     end = ROUNDUP(end, CLASS_SIZE(0));
 
     // LAB 6: Your code here
+    while (start < end) {
+        class = 0;
+
+        // А что мы тут делаем?
+        while (class <= MAX_CLASS && (CLASS_MASK(class) & start) == 0) {
+            ++class;
+        }
+        // А тут?
+        while (class && ((CLASS_MASK(class) & start) != 0 || start + CLASS_SIZE(class) > end)) {
+
+        }
+
+        page_lookup(NULL, start, class, type, 1);
+        start += CLASS_SIZE(class);
+    }
 }
 
 /*
@@ -437,6 +492,9 @@ dump_virtual_tree(struct Page *node, int class) {
 void
 dump_memory_lists(void) {
     // LAB 6: Your code here
+    // Можно ли это назвать получше? Что это значит?
+    //   это может помочь придумать название.
+    static const int SKIP = 10;
 
 }
 
@@ -477,7 +535,7 @@ found:
     list_del(li);
 
     size_t ndesc = 0;
-    static bool allocating_pool;
+    static bool allocating_pool;  // Не инициализированная переменная? И мы к ней, вроде, можем обратится.. Разобраться.
     if (flags & ALLOC_POOL) {
         assert(!allocating_pool);
         allocating_pool = 1;
@@ -520,7 +578,7 @@ __attribute__((aligned(HUGE_PAGE_SIZE))) uint8_t one_page_raw[HUGE_PAGE_SIZE];
 
 
 /*
- * This function initialized phyisical memory tree
+ * This function initialized physical memory tree
  * with either UEFI memory map or CMOS contents.
  * Every region is inserted into the tree using
  * attach_region() function.
@@ -551,6 +609,7 @@ detect_memory(void) {
             case EFI_BOOT_SERVICES_CODE:
             case EFI_BOOT_SERVICES_DATA:
             case EFI_CONVENTIONAL_MEMORY:
+                // TODO: почему write-back? Ещё может быть write-through, в неё тоже можно писать.
                 type = start->Attribute & EFI_MEMORY_WB ? ALLOCATABLE_NODE : RESERVED_NODE;
                 break;
             default:

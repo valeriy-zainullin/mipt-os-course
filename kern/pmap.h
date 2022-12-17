@@ -67,12 +67,12 @@ void __nosan_memmove(void *, void *, size_t);
 #define MAX_ALLOCATION_CLASS 9
 
 enum PageState {
-    MAPPING_NODE = 0x100000,      /* Memory mapping (part of virtual tree) */
-    INTERMEDIATE_NODE = 0x200000, /* Intermediate node of virtual memory tree */
-    PARTIAL_NODE = 0x300000,      /* Intermediate node of physical memory tree */
-    ALLOCATABLE_NODE = 0x400000,  /* Generic allocatable memory (part of physical tree) */
-    RESERVED_NODE = 0x500000,     /* Reserved memory (part of physical tree) */
-    NODE_TYPE_MASK = 0xF00000,
+    MAPPING_NODE = 0x100000,      /* Memory mapping (part of virtual tree) */ /* Virtual address mapped somewhere, a leaf in the tree (TODO: check!) */
+    INTERMEDIATE_NODE = 0x200000, /* Intermediate node of virtual memory tree */ /* Intermediate node in the tree of virtual memory segments, not the leaf, and because of that not the actual mapping */
+    PARTIAL_NODE = 0x300000,      /* Intermediate node of physical memory tree */ /* Node is intermidate in physical memory tree, meaning it's neither a taken segment, nor a free segment on itself. If both left and right child are taken, maybe the memory taken corresponds to diffreent allocations */
+    ALLOCATABLE_NODE = 0x400000,  /* Generic allocatable memory (part of physical tree) */ /* Free nodes in physical memory free, leafs. */
+    RESERVED_NODE = 0x500000,     /* Reserved memory (part of physical tree) */ /* Already taken physical memory vertices, leafs (TODO: check! A way to check is to dump the tree and see what happens.) */
+    NODE_TYPE_MASK = 0xF00000,    // Mask that could be used to extract page state.
 };
 
 extern __attribute__((aligned(HUGE_PAGE_SIZE))) uint8_t zero_page_raw[HUGE_PAGE_SIZE];
