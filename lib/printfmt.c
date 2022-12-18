@@ -57,8 +57,18 @@ print_num(void (*putch)(int, void *), void *put_arg,
 /* Get an unsigned int of various possible sizes from a varargs list,
  * depending on the lflag parameter. */
 static uintmax_t
-get_unsigned(va_list *ap, int lflag, bool zflag) {
+get_unsigned(va_list *ap, int lflag, bool zflag, int hflag) {
     if (zflag) return va_arg(*ap, size_t);
+
+    switch (hflag) {
+    case 0:
+        break;
+    // Compiler warns that char (or short, the same warning) is converted to int,
+    //   if passed through variadic arguments. Can't write unsigned char (unsigned short) here.
+    case 1:
+    case 2:
+        return va_arg(*ap, unsigned int);
+    }
 
     switch (lflag) {
     case 0:
@@ -73,8 +83,18 @@ get_unsigned(va_list *ap, int lflag, bool zflag) {
 /* Same as getuint but signed - can't use getuint
  * because of sign extension */
 static intmax_t
-get_int(va_list *ap, int lflag, bool zflag) {
+get_int(va_list *ap, int lflag, bool zflag, int hflag) {
     if (zflag) return va_arg(*ap, size_t);
+
+    switch (hflag) {
+    case 0:
+        break;
+    // Compiler warns that char (or short, the same warning) is converted to int,
+    //   if passed through variadic arguments. Can't write signed char (short) here.
+    case 1:
+    case 2:
+        return va_arg(*ap, int);
+    }
 
     switch (lflag) {
     case 0:
@@ -106,7 +126,7 @@ vprintfmt(void (*putch)(int, void *), void *put_arg, const char *fmt, va_list ap
         /* Process a %-escape sequence */
         char padc = ' ';
         int width = -1, precision = -1;
-        unsigned lflag = 0, base = 10;
+        unsigned lflag = 0, hflag = 0, base = 10;
         bool altflag = 0, zflag = 0;
         uintmax_t num = 0;
     reswitch:
@@ -154,6 +174,10 @@ vprintfmt(void (*putch)(int, void *), void *put_arg, const char *fmt, va_list ap
             lflag++;
             goto reswitch;
 
+        case 'h': /* half width flag (one for short, doubled for char) */
+            hflag++;
+            goto reswitch;
+
         case 'z':
             zflag = 1;
             goto reswitch;
@@ -195,7 +219,7 @@ vprintfmt(void (*putch)(int, void *), void *put_arg, const char *fmt, va_list ap
         }
 
         case 'd': /* (signed) decimal */ {
-            intmax_t i = get_int(&aq, lflag, zflag);
+            intmax_t i = get_int(&aq, lflag, zflag, hflag);
             if (i < 0) {
                 putch('-', put_arg);
                 i = -i;
@@ -206,14 +230,14 @@ vprintfmt(void (*putch)(int, void *), void *put_arg, const char *fmt, va_list ap
         }
 
         case 'u': /* unsigned decimal */
-            num = get_unsigned(&aq, lflag, zflag);
+            num = get_unsigned(&aq, lflag, zflag, hflag);
             /* base = 10; */
             goto number;
 
         case 'o': /* (unsigned) octal */
             // LAB 1: Your code here:
             // My code.
-            num = get_unsigned(&aq, lflag, zflag);
+            num = get_unsigned(&aq, lflag, zflag, hflag);
             base = 8;
             goto number;
             // End of my code.
@@ -228,10 +252,17 @@ vprintfmt(void (*putch)(int, void *), void *put_arg, const char *fmt, va_list ap
 
         case 'X': /* (unsigned) hexadecimal, uppercase */
         case 'x': /* (unsigned) hexadecimal, lowercase */
-            num = get_unsigned(&aq, lflag, zflag);
+            num = get_unsigned(&aq, lflag, zflag, hflag);
             base = 16;
         number:
             print_num(putch, put_arg, num, base, width, padc, ch == 'X');
+            break;
+
+        case 'b': /* (unsigned) binary */
+            // My code.
+            num = get_unsigned(&aq, lflag, zflag, hflag);
+            base = 2;
+            goto number;
             break;
 
         case '%': /* escaped '%' character */
