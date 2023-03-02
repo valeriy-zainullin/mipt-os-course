@@ -203,6 +203,10 @@ mon_timer_frequency(int argc, char **argv, struct Trapframe *tf) {
  * This command should call dump_memory_lists()
  */
 // LAB 6: Your code here
+int mon_memory(int argc, char **argv, struct Trapframe *tf){
+    dump_memory_lists();
+    return 0;
+}
 
 /* Kernel monitor command interpreter */
 

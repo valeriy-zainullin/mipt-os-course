@@ -98,7 +98,6 @@ list_del(struct List *list) {
     // LAB 6: Your code here.
     // Если единственный элемент в списке, то код хоть и будет странным, правильно отработает.
     //   Но удалять всё-таки запретим, поскольку нового списка по факту создать не удастся.
-    assert(list->prev != list);
     list->prev->next = list->next;
     list->next->prev = list->prev;
     list_init(list);
@@ -189,22 +188,20 @@ alloc_child(struct Page *parent, bool right) {
     new->parent = parent;
 
     if (parent->refc == 0) {
-        // TODO: Это, получается, родитель или ещё не присвоен в дерево, или удален уже? Что это значит?
+        // Дерево ещё не инициализировано, ноль.
         new->refc = 0;
     } else {
         // Окей, на нас ссылается родитель.
         new->refc = 1;
     }
 
-    // Возможно, это вот та фигня типа page directory, page table, page... Классы -- это они.
-    // Но в любом случае тут класс соответствует высоте узла.
+    // Класс соответствует размеру участка памяти.
+    // Ребенок родителя управляет отрезком памяти в два раза меньше.
     new->class = parent->class - 1;
 
     if (right) {
-        // TODO: почему мы здесь сдвигаем на столько, а не делим на 2? Если узел отвечает за правую половину отрезка памяти.
-        // Получается, у классов узлов высоты 0 размер 4096. А если подняться выше, 8192 и т.д.
-        // Наверно, это размер одной страницы.
-        new->addr = parent->addr + (CLASS_SIZE(new_class) >> CLASS_BASE);
+        // Узел отвечает за старшую (правую) половину памяти родителя.
+        new->addr = parent->addr + (CLASS_SIZE(new->class) >> CLASS_BASE);
         parent->right = new;
     } else {
         new->addr = parent->addr;
@@ -351,7 +348,7 @@ page_unref(struct Page *page) {
  * page size class (0) to MAX_CLASS trying to get
  * aligned address. And then iterate from maximal
  * used class to minimal, allocating page of that
- * class it it does not extend beyond given region
+ * class if it does not extend beyond given region
  *
  * HINT: CLASS_MASK() and CLASS_SIZE() macros might be
  * useful here
@@ -370,17 +367,19 @@ attach_region(uintptr_t start, uintptr_t end, enum PageState type) {
     while (start < end) {
         class = 0;
 
-        // А что мы тут делаем?
-        while (class <= MAX_CLASS && (CLASS_MASK(class) & start) == 0) {
-            ++class;
+        // Наша задача -- добавить новый участок физической памяти в дерево, мы их итеративно добавляем
+        //   из карты UEFI и понимаем, что такой участок есть.
+        // Мы ищем максимальный класс, которым можно взять отрезок, чтобы
+        //   начало отрезка делилось на размер класса и в отрезке можно было 
+        //   создать подотрезок от начала с таким классом.
+        //   
+        for (int class = MAX_CLASS; class >= 0; --class) {
+            if (start % CLASS_SIZE(class) == 0 && start + CLASS_SIZE(class) <= end) {
+                page_lookup(NULL, start, class, type, 1);
+                start += CLASS_SIZE(class);
+                break;
+            }
         }
-        // А тут?
-        while (class && ((CLASS_MASK(class) & start) != 0 || start + CLASS_SIZE(class) > end)) {
-
-        }
-
-        page_lookup(NULL, start, class, type, 1);
-        start += CLASS_SIZE(class);
     }
 }
 
@@ -492,10 +491,31 @@ dump_virtual_tree(struct Page *node, int class) {
 void
 dump_memory_lists(void) {
     // LAB 6: Your code here
-    // Можно ли это назвать получше? Что это значит?
-    //   это может помочь придумать название.
+    // TODO: write comments to explain what is it.
     static const int SKIP = 10;
 
+    for (int class = 0; class < MAX_CLASS; ++class) {
+        struct List *list = &free_classes[class];
+
+        cprintf("Class[%d] size(%0llx) {", class, CLASS_SIZE(class));
+
+        int i = 0;
+        for (struct List *cur_node = list->next; cur_node != list; cur_node = cur_node->next, ++i) {
+            if (i % SKIP == 0) {
+                cprintf("\n    ");
+            }
+
+            struct Page *page = (struct Page*) cur_node;
+
+            cprintf("0x%08zx ", (uintptr_t) page->addr << CLASS_BASE);
+        }
+
+        cprintf("\n}\n");
+
+        if (i == 0) {
+            break;
+        }
+    }
 }
 
 /*
@@ -591,11 +611,13 @@ detect_memory(void) {
 
     /* Attach first page as reserved memory */
     // LAB 6: Your code here
+    attach_region((uintptr_t) 0, (uintptr_t) PAGE_SIZE, RESERVED_NODE);
 
     /* Attach kernel and old IO memory
      * (from IOPHYSMEM to the physical address of end label. end points the the
      *  end of kernel executable image.)*/
     // LAB 6: Your code here
+    attach_region((uintptr_t) IOPHYSMEM, PADDR(end), RESERVED_NODE);
 
     /* Detech memory via ether UEFI or CMOS */
     if (uefi_lp && uefi_lp->MemoryMap) {
@@ -621,9 +643,7 @@ detect_memory(void) {
             /* Attach memory described by memory map entry described by start
              * of type type*/
             // LAB 6: Your code here
-            (void)type;
-
-
+            attach_region(start->PhysicalStart, start->NumberOfPages * EFI_PAGE_SIZE + start->PhysicalStart, type);
 
             start = (void *)((uint8_t *)start + uefi_lp->MemoryMapDescriptorSize);
         }
