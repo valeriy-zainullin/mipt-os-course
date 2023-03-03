@@ -33,6 +33,7 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #endif
 
 /*  Printing macros are not supported in JOS. */
+// Student update: not true anymore, added them to "stdio.h".
 #ifndef PRIx8
 #define PRIx8  "hhx"
 #define PRIx16 "hx"

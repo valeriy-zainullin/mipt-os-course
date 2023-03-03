@@ -8,6 +8,18 @@
 #define NULL ((void *)0)
 #endif
 
+#ifndef PRIx8
+#define PRIx8   "hhx"
+#define PRIx16  "hx"
+#define PRIx32  "x"
+#define PRIx64  "lx"
+#define PRId32  "d"
+#define PRId64  "ld"
+#define PRIu32  "u"
+#define PRIu64  "lu"
+#define PRIuPTR "lu"
+#endif
+
 /* lib/stdio.c */
 void cputchar(int c);
 int getchar(void);

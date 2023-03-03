@@ -52,6 +52,8 @@ static struct Command commands[] = {
     {"timer_start", "Starts timer ...", mon_timer_start},
     {"timer_stop", "Starts timer ...", mon_timer_stop},
     {"timer_freq", "Starts timer ...", mon_timer_frequency},
+    {"dump_page_table", "Dumps active page table", mon_pagetable},
+    {"dump_virtual_tree", "Dumps active virtual tree", mon_virt},
 };
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
 
@@ -205,7 +207,7 @@ mon_timer_frequency(int argc, char **argv, struct Trapframe *tf) {
  * This command should call dump_memory_lists()
  */
 // LAB 6: Your code here
-int mon_memory(int argc, char **argv, struct Trapframe *tf){
+int mon_memory(int argc, char **argv, struct Trapframe *tf) {
     dump_memory_lists();
     return 0;
 }
@@ -213,6 +215,30 @@ int mon_memory(int argc, char **argv, struct Trapframe *tf){
 /* Implement mon_pagetable() and mon_virt()
  * (using dump_virtual_tree(), dump_page_table())*/
 // LAB 7: Your code here
+
+/* Currently active address spcae */
+// Brought here, because should not be
+//   in header pmap.h, no other places
+//   should see this variable.
+extern struct AddressSpace *current_space;
+
+int mon_pagetable(int argc, char **argv, struct Trapframe *tf) {
+    (void) argc;
+    (void) argv;
+    (void) tf;
+
+    dump_page_table(current_space->pml4);
+    return 0;
+}
+
+int mon_virt(int argc, char **argv, struct Trapframe *tf) {
+    (void) argc;
+    (void) argv;
+    (void) tf;
+
+    dump_virtual_tree(current_space->root, MAX_CLASS, 0, VIRT_TREE_DIR_ROOT);
+    return 0;
+}
 
 /* Kernel monitor command interpreter */
 

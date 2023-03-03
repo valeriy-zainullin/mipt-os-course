@@ -397,8 +397,16 @@ page_lookup_virtual(struct Page *node, uintptr_t addr, int class, int alloc) {
 
 
     int nclass = MAX_CLASS;
+    // Идём по дереву, спускаемся. При каждом спуске класс уменьшается
+    //   на единицу.
     while (nclass > class) {
         assert(nclass > 0);
+
+        // Проверяем, правый это ребёнок, или левый.
+        //   Как мы это делаем? Смотрим, стоит
+        //   ли старший бит в последних
+        //   log_2(CLASS_SIZE(nclass)) битах. Если стоит,
+        //   это старшая половина адресов, иначе младшая.
         bool right = addr & CLASS_SIZE(nclass - 1);
 
 
@@ -535,6 +543,10 @@ prot2pte(int flags) {
  */
 inline static void
 dump_entry(pte_t base, size_t step, bool isz) {
+    // This segment ("[%08llX, %08llX]")
+    //   is ...
+    // TODO: fill the dots with what this is
+    //   exactly.
     cprintf("%s[%08llX, %08llX] %c%c%c%c%c -- step=%zx\n",
             step == 4 * KB ? " >    >    >    >" :
             step == 2 * MB ? " >    >    >" :
@@ -600,6 +612,8 @@ check_physical_tree(struct Page *page) {
     }
 }
 
+// This function will tell us a lot about tree structure,
+//   because it validates the tree.
 static void
 check_virtual_tree(struct Page *page, int class) {
     assert(class >= 0);
@@ -628,9 +642,71 @@ check_virtual_tree(struct Page *page, int class) {
 /*
  * Pretty-print virtual memory tree
  */
+// Unsigned int, because
+//   for every descend
+//   class decreases by one,
+//   padding goes by one,
+//   so it's not more than
+//   class. The value fits
+//   in this type.
+
 void
-dump_virtual_tree(struct Page *node, int class) {
+dump_virtual_tree(struct Page *node, int class, unsigned int level, int tree_direction) {
     // LAB 7: Your code here
+
+    // Format:
+    //   Virtual tree:
+    //   Node:%d@%p INTERMEDIATE_NODE
+    //   L Node:%d@%p MAPPING_NODE -> %p
+    //    (lvl-1)' 'L Node:%d@%p MAPPING_NODE -> %p
+    //    R Node:%d@%p MAPPING_NODE -> %p
+    // Depth is not more than log_2(MAX_RAM),
+    //   so it should not overflow the stack.
+    assert_virtual(node);
+
+    if (level >= 2) {
+        for (unsigned int i = 0; i < level - 1; ++i) {
+            cprintf(" ");
+        }
+    }
+    if (tree_direction == VIRT_TREE_DIR_ROOT) {
+        // Nothing to print.
+    } else if (tree_direction == VIRT_TREE_DIR_LEFT_CHILD) {
+        cprintf("L ");
+    } else if (tree_direction == VIRT_TREE_DIR_RIGHT_CIHLD) {
+        cprintf("R ");
+    }
+    cprintf("Node:%d@%p ", class, (void*) node);
+    // Состояние страницы хранится в узле в одной переменной
+    //   с флагами.
+    // Есть такая строка в map_page:
+    //   mapping->state = (PAGE_PROT(flags) & ~PROT_COMBINE) | MAPPING_NODE;
+    // Потому достанем состояние.
+    enum PageState state = node->state & NODE_TYPE_MASK;
+    if (state == INTERMEDIATE_NODE) {
+        cprintf("INTERMEDIATE_NODE\n");
+
+        struct Page* left_child = node->left;
+        struct Page* right_child = node->right;
+
+        assert(class >= 1);
+        // If an INTERMEDIATE_NODE doesn't have
+        //   one of it's children, it means
+        //   that area is not allocated.
+        if (left_child != NULL) {
+            dump_virtual_tree(left_child,  class - 1, level + 1, VIRT_TREE_DIR_LEFT_CHILD);
+        }
+        if (right_child != NULL) {
+            dump_virtual_tree(right_child, class - 1, level + 1, VIRT_TREE_DIR_RIGHT_CIHLD);
+        }
+    } else if (state == MAPPING_NODE) {
+        cprintf("MAPPING_NODE -> %p\n", node->phy);
+        assert(node->phy != NULL);
+        cprintf("MAPPING_NODE -> %p\n", node->phy);
+    } else {
+        // Invalid node state for a virtual tree node.
+        assert(0); // Should not reach this place.
+    }
 }
 
 void
@@ -663,6 +739,78 @@ dump_memory_lists(void) {
     }
 }
 
+
+static const unsigned int PAGE_LEVEL_PML4 = 0;
+static const unsigned int PAGE_LEVEL_PDP  = 1;
+static const unsigned int PAGE_LEVEL_PD   = 2;
+static const unsigned int PAGE_LEVEL_PT   = 3;
+// table должен указывать на элемент таблицы
+//   через участок для доступа к физической
+//   памяти.
+// matched_mem_start -- адрес первого байта
+//   виртуальной памяти,  
+static void
+dump_page_table_level(pte_t* table, unsigned int level) {
+    size_t num_entries    = 0;
+    size_t mem_per_entry  = 0;
+
+    switch (level) {
+    case PAGE_LEVEL_PML4: {
+        num_entries    = PML4_ENTRY_COUNT;
+        mem_per_entry  = CLASS_SIZE(27);
+        break;
+    }
+    case PAGE_LEVEL_PDP: {
+        num_entries    = PDP_ENTRY_COUNT;
+        mem_per_entry  = CLASS_SIZE(18);
+        break;
+    }
+    case PAGE_LEVEL_PD: {
+        num_entries    = PD_ENTRY_COUNT;
+        mem_per_entry  = CLASS_SIZE(9);
+        break;
+    }
+    case PAGE_LEVEL_PT: {
+        num_entries    = PT_ENTRY_COUNT;
+        mem_per_entry  = CLASS_SIZE(0);
+        break;
+    }
+    default: {
+        assert(0); // Should not reach this.
+        return;
+    }
+    }
+
+    for (size_t i = 0; i < num_entries; ++i) {
+        pte_t entry = table[i];
+
+        bool is_present = (entry & PTE_P ) != 0;
+        bool is_huge    = (entry & PTE_PS) != 0;
+
+        if (!is_present) {
+            // Not mapped.
+            continue;
+        }
+
+        // Size bit (huge) means the table entry
+        //   lazily allocates it's children.
+        // There's no size bit in page table
+        //   entries, because there's no
+        //   children to lazily allocate :)
+        bool is_leaf = is_huge || level == PAGE_LEVEL_PT;
+
+        dump_entry(table[i], mem_per_entry, is_leaf);
+
+        if (!is_leaf) {
+            // Entry stores physical address + flags.
+            //   To reference this address we need
+            //   to convert it to pointer to physical
+            //   memory area.
+            dump_page_table_level((pte_t*) KADDR(PTE_ADDR(entry)), level + 1);
+        }
+    }
+}
+
 /*
  * Pretty-print page table
  * You can read about page the table
@@ -672,27 +820,38 @@ dump_memory_lists(void) {
  */
 void
 dump_page_table(pte_t *pml4) {
-    uintptr_t addr = 0;
     cprintf("Page table:\n");
-    (void)addr;
     // LAB 7: Your code here
+    dump_page_table_level(pml4, PAGE_LEVEL_PML4);
 }
 
+// Alloc page table entry and allocate a physical page for it.
 inline static int
 alloc_pt(pte_t *dst) {
-    if (!(*dst & PTE_P) || (*dst & PTE_PS)) {
+    // Page is not present or page size it's a "big page" (page size == 1).
+    if ((*dst & PTE_P) == 0 || (*dst & PTE_PS) != 0) {
+        // Then we allocate a physical memory page.
         struct Page *page = alloc_page(0, ALLOC_BOOTMEM);
+        assert_physical(page); // Assert the comment above;
         if (!page) return -E_NO_MEM;
 #ifdef SANITIZE_SHADOW_BASE
         assert(page2pa(page) + CLASS_SIZE(page->class) <= BOOT_MEM_SIZE);
 #endif
-        assert(!page->refc);
-        page_ref(page);
+        assert(page->refc == 0);                      // Check was not used before.
+        page_ref(page);                               // Now we reference it.
+        // Page table entry:
+        //   [------------------------------]
+        //   32                            0
+        // TODO: fill this map of bits, move to pte_t definition, say that
+        //   it's entry of page table.
         *dst = page2pa(page) | PTE_U | PTE_W | PTE_P;
 
 #ifdef SANITIZE_SHADOW_BASE
         if (current_space) platform_asan_unpoison(KADDR(page2pa(page)), CLASS_SIZE(0));
 #endif
+        // We reference physical address through kernel space high addresses.
+        //   That's the place, where we can fail to utilize physical memory,
+        //   if doesn't fit.
         memset(KADDR(page2pa(page)), 0, CLASS_SIZE(0));
     }
     return 0;
@@ -733,7 +892,9 @@ inline static int
 alloc_fill_pt(pte_t *dst, pte_t base, size_t step, size_t i0, size_t i1) {
     assert(i0 != i1);
     bool need_recur = step > 1 * GB || (step == 1 * GB && !has_1gb_pages);
-    if (!need_recur && step != 4 * KB) base |= PTE_PS;
+    if (!need_recur && step != 4 * KB) {
+        base |= PTE_PS;
+    }
 
     if (trace_memory_more) dump_entry(base, step, i1 - i0);
 
@@ -749,6 +910,7 @@ alloc_fill_pt(pte_t *dst, pte_t base, size_t step, size_t i0, size_t i1) {
             dst[i] = base;
         }
     }
+
 
     return 0;
 }
@@ -769,10 +931,22 @@ alloc_fill_pt(pte_t *dst, pte_t base, size_t step, size_t i0, size_t i1) {
  */
 static void
 memcpy_page(struct AddressSpace *dst, uintptr_t va, struct Page *page) {
-    assert(current_space);
-    assert(dst);
+    assert(current_space != NULL);
+    assert(dst != NULL);
+    assert_physical(page);
 
     // LAB 7: Your code here
+    // Let's switch address space first.
+    struct AddressSpace* prev_space = switch_address_space(dst);
+
+    // Better to restore write protection back, but it's a TODO.
+    // Disable write protection for the time being.
+    set_wp(false);
+
+    // Copy through kernel high addresses.
+    nosan_memcpy((void*) va, KADDR(page2pa(page)), CLASS_SIZE(page->class));
+
+    switch_address_space(prev_space);
 }
 
 static void
@@ -790,18 +964,28 @@ tlb_invalidate_range(struct AddressSpace *spc, uintptr_t start, uintptr_t end) {
     }
 }
 
+// Убирает отображение (из дерева страниц ядра и аппаратных таблиц страниц)
+//   виртуальной страницы по адресу в адресном пространстве, переданном в
+//   качестве аргумента. Нужен ещё и класс страницы (размер условно,
+//   log2(размер) - 12).
+// Работает так же, как и map_page, только вместо выделения
+//   теперь удаляет страницы из таблицы.
 static void
 unmap_page(struct AddressSpace *spc, uintptr_t addr, int class) {
     if (trace_memory) cprintf("<%p> Unmapping [%08lX, %08lX]\n",
                               spc, addr, addr + (long)CLASS_MASK(class));
     int res;
-    assert(!(addr & CLASS_MASK(class)));
+    assert((addr & CLASS_MASK(class)) == 0);
 
+    // Ищем страницу по адресному пространству, виртуальному адресу и классу.
     struct Page *node = page_lookup_virtual(spc->root, addr, class, LOOKUP_ALLOC);
+
+
     if (node) unmap_page_remove(node);
     /* Disallow root node deallocation */
-    if (node == spc->root)
+    if (node == spc->root) {
         spc->root = alloc_descriptor(INTERMEDIATE_NODE);
+    }
 
     uintptr_t end = addr + CLASS_SIZE(class);
     uintptr_t inval_start = addr, inval_end = end;
@@ -813,12 +997,17 @@ unmap_page(struct AddressSpace *spc, uintptr_t addr, int class) {
         goto finish;
     }
 
-    if (!(spc->pml4[pml4i0] & PTE_P)) return;
+    if ((spc->pml4[pml4i0] & PTE_P) == 0) {
+        return;
+    }
     pdpe_t *pdp = KADDR(PTE_ADDR(spc->pml4[pml4i0]));
 
     size_t pdpi0 = PDP_INDEX(addr), pdpi1 = PDP_INDEX(end);
 
     /* Fixup index if pdpi0 == 511 and pdpi1 == 0 (and should be 512) */
+    // Посмотрите сначала функцию map_page. Доказательство такое же,
+    //   как и там. Мы на самом деле так же части отрезка выделяем,
+    //   хвост оставляем для следующих уровней, как и в map_page.
     if (pdpi0 > pdpi1) pdpi1 = PDP_ENTRY_COUNT;
 
     /* Unmap 1*GB hardware page if size of virtual page
@@ -831,11 +1020,11 @@ unmap_page(struct AddressSpace *spc, uintptr_t addr, int class) {
 
     /* If page is not present don't need to do anything */
 
-    if (!(pdp[pdpi0] & PTE_P))
+    if ((pdp[pdpi0] & PTE_P) == 0)
         return;
     /* otherwise we need to split 1*GB page hw page
      * into smaller 2*MB pages, allocting new page table level */
-    else if (pdp[pdpi0] & PTE_PS) {
+    else if ((pdp[pdpi0] & PTE_PS) != 0) {
         pdpe_t old = pdp[pdpi0];
         res = alloc_pt(pdp + pdpi0);
         assert(!res);
@@ -846,30 +1035,56 @@ unmap_page(struct AddressSpace *spc, uintptr_t addr, int class) {
         assert(!res);
     }
     pde_t *pd = KADDR(PTE_ADDR(pdp[pdpi0]));
-    (void)pd;
 
 
     /* Unmap 2 MB hw pages if requested virtual page size is larger than
      * or equal 2 MB.
      * Use remove_pt() here. remove_pt() can handle recusive removal.
-     * TIP: this resembles closely unmapping code */
+     * TIP: this resembles closely mapping code */
 
     // LAB 7: Your code here
+    // Действуем так же, как и в map_page, только теперь вызываем remove_pt.
+    //   Или же можно взять по аналогии с кодом выше. Я выберу второй вариант.
+    //   В map_page мы тоже продолжали остальные уровни по аналогии.
 
-    size_t pdi0 = 0, pdi1 = 0;
+    size_t pdi0 = PD_INDEX(addr);
+    size_t pdi1 = PD_INDEX(end);
 
-    /* Return if page is not present or
-     * split 2*MB page into 4KB pages if required.
-     * Then load apporopriate page table kernel virutal address
-     * to the pt pointer.
-     * Use alloc_pt(), alloc_fill_pt(), KADDR here
-     * (just like is above for 1BG pages)
-     */
+    if (pdi0 > pdi1) {
+        pdi1 = PD_ENTRY_COUNT;
+    }
 
-    // LAB 7: Your code here
+    // Unmap an integer number of pd entries (page tables)
+    //   if size of virtual page is >= than 2MB. A page
+    //   table covers 2MB region.
+    if (class >= 9) {
+        remove_pt(pd, addr, 2 * MB, pdi0, pdi1);
+        goto finish;
+    }
 
-    (void)pdi1, (void)pdi0;
-    pte_t *pt = NULL;
+    /* If page directory entry is not present don't need to do anything */
+    if ((pd[pdi0] & PTE_P) == 0)
+        return;
+    /* otherwise we need to split 2*MB page hw page
+     * into smaller 4*KB pages, allocting new page table level */
+    else if ((pd[pdi0] & PTE_PS) != 0) {
+        pde_t old = pd[pdi0];
+        res = alloc_pt(pd + pdi0);
+        assert(res == 0);
+        pte_t *pt = KADDR(PTE_ADDR(pd[pdi0]));
+        res = alloc_fill_pt(pt, old & ~PTE_PS, 4 * KB, 0, PT_ENTRY_COUNT);
+        inval_start = ROUNDDOWN(inval_start, 2 * MB);
+        inval_end = ROUNDUP(inval_end, 2 * MB);
+        assert(res == 0);
+    }
+
+    pde_t *pt = KADDR(PTE_ADDR(pd[pdi0]));
+
+
+    // Otherwise, size is less than 2mb and we stay in the same PD entry (PT).
+    //   The same logic as with pml4. Please, check above and ask
+    //   me to explain this case (and add a comment, I'll happily do that),
+    //   if anything.
 
     /* Unmap 4KB hw pages */
     size_t pti0 = PT_INDEX(addr), pti1 = PT_INDEX(end);
@@ -886,18 +1101,27 @@ finish:
     tlb_invalidate_range(spc, inval_start, inval_end);
 }
 
+// Map page of physical memory into an address space at address
+//   addr by registering it in paging tables.
 static int
 map_page(struct AddressSpace *spc, uintptr_t addr, struct Page *page, int flags) {
-    assert(!(flags & PROT_LAZY) | !(flags & PROT_SHARE));
-    assert(page && spc);
+
+    // assert(!(flags & PROT_LAZY) | !(flags & PROT_SHARE));
+    // This is hard to read in my opinion, I would not do that
+    //   at work, but here I'll change that.
+    assert((flags & PROT_LAZY) == 0 && (flags & PROT_SHARE) == 0);
+    assert(page != NULL && spc != NULL);
     assert_physical(page);
-    assert(!(addr & CLASS_MASK(page->class)));
+    // assert(!(addr & CLASS_MASK(page->class)));
+    assert(addr % CLASS_SIZE(page->class) == 0); // The same as !(addr & CLASS_MASK(page->class)).
 
     /* NOTE ALLOC_WEAK cannot be map()'ed/unmap()'ed
      * since it does not store any
      * metadata and only exits as a part of page table */
 
-    if (!(flags & ALLOC_WEAK)) {
+
+    if ((flags & ALLOC_WEAK) == 0) {
+
         page_ref(page);
         unmap_page(spc, addr, page->class);
         struct Page *mapping = page_lookup_virtual(spc->root, addr, page->class, LOOKUP_ALLOC);
@@ -908,52 +1132,122 @@ map_page(struct AddressSpace *spc, uintptr_t addr, struct Page *page, int flags)
         list_append((struct List *)page, (struct List *)mapping);
     }
 
+
     if (trace_memory) cprintf("<%p> Mapping [%08lX, %08lX] to [%08lX, %08lX] (class=%d flags=%x)\n", spc,
                               page2pa(page), page2pa(page) + (long)CLASS_SIZE(page->class) - 1,
                               addr, addr + (long)CLASS_SIZE(page->class) - 1, page->class, flags);
 
-    /* Insert page into page table */
+    /* Register page in paging tables */
 
+    // We are allocating paged address space region from [addr; end)
+    //   And we'll also use that addr % CLASS_SIZE(page->class) == 0
+    //   and size of region is a power of 2/
     uintptr_t end = addr + CLASS_SIZE(page->class);
     uintptr_t base = page2pa(page) | prot2pte(flags);
-    assert(!(page2pa(page) & CLASS_MASK(page->class)));
+    assert((page2pa(page) & CLASS_MASK(page->class)) == 0);
 
     size_t pml4i0 = PML4_INDEX(addr), pml4i1 = PML4_INDEX(end);
     /* Fill PML4 range if page size is larger than 512GB */
     if (page->class >= 27) {
+        // Address is aligned on physical page size.
+        //   Open pml4.png, it's in the root of repository.
+        //   Page size in this case >= 2^(27 + 12) = 2^39.
+        //   This means that region is covered by full pml
+        //   table entries. To cover the region we have to
+        //   create a couple of pml4 entries and populate
+        //   all their subentries recursively. That's what
+        //   this function will do. 
+
         int res = alloc_fill_pt(spc->pml4, base, 512 * GB, pml4i0, pml4i1);
         if (pml4i1 - 1 >= NUSERPML4) propagate_pml4(spc);
         return res;
     }
 
-    /* Allocate empty pdp if required */
-    if (!(spc->pml4[pml4i0] & PTE_P)) {
+    // Otherwise, class size is less and all pages reside
+    //   in a single pml4 entry.
+    // Why? I need to also prove this for myelf.
+    //   Because addresses of virtual address space
+    //   we want to map start from addr up to addr + CLASS_SIZE(class) - 1.
+    //   And addr % CLASS_SIZE(class) == 0 (addr % 2^(class + 12) == 0),
+    //   class + 12 < 39.
+    //   addr % 2^(class + 12) == 0 means we have at least (class + 12)
+    //   trailing zero bits.
+    //   2^(class + 12) - 1 = CLASS_SIZE(class) - 1 is just the most trailing
+    //   (class + 12) one bits.
+    //   addr + 2^(class + 12) - 1.
+    //   We don't leave pml4 entry of addr, because we enumerate addresses we map,
+    //   we only change most trailing (class + 12) bits, which is less than 39,
+    //   so we don't even change bit 38 (from 0 to 38 there are 39 bits), not to
+    //   mention bits from 39 onwards.
+    // Every pml4 entry is a pdp table. So we don't leave a single pdp.
+
+
+    /* Allocate empty pdp in pml table if required */
+    // If it wasn't there, basically. We have to have it.
+    if ((spc->pml4[pml4i0] & PTE_P) == 0) {
         if (alloc_pt(spc->pml4 + pml4i0) < 0) return -E_NO_MEM;
         if (pml4i0 >= NUSERPML4) propagate_pml4(spc);
     }
-    assert(!(spc->pml4[pml4i0] & PTE_PS)); /* There's (yet) no support for 512GB pages in x86 arch */
+    assert((spc->pml4[pml4i0] & PTE_PS) == 0); /* There's (yet) no support for 512GB pages in x86 arch */
     pdpe_t *pdp = KADDR(PTE_ADDR(spc->pml4[pml4i0]));
+
 
     /* If requested region is larger than or equal to 1GB (at least one whole PD) */
 
-    size_t pdpi0 = PDP_INDEX(addr), pdpi1 = PDP_INDEX(end);
+    // Indices inside of the pdp.
+    size_t pdpi0 = PDP_INDEX(addr);
+    size_t pdpi1 = PDP_INDEX(end);
     /* Fixup index if pdpi0 == 511 and pdpi1 == 0 (and should be 512) */
-    if (pdpi0 > pdpi1) pdpi1 = PDP_ENTRY_COUNT;
-    /* Fill PDP range if page size is larger than 1GB */
-    if (page->class >= 18) return alloc_fill_pt(pdp, base, 1 * GB, pdpi0, pdpi1);
-
-    /* Allocate empty pd... */
-    if (!(pdp[pdpi0] & PTE_P) && alloc_pt(pdp + pdpi0) < 0) return -E_NO_MEM;
-    /* ...or split 1GB page into 2MB pages if required */
-    else if (pdp[pdpi0] & PTE_PS) {
-        pdpe_t old = pdp[pdpi0];
-        if (alloc_pt(pdp + pdpi0) < 0) return -E_NO_MEM;
-        pde_t *pd = KADDR(PTE_ADDR(pdp[pdpi0]));
-        if (alloc_fill_pt(pd, old & ~PTE_PS, 2 * MB, 0, PT_ENTRY_COUNT) < 0) return -E_NO_MEM;
+    // Because we need to allocate [addr; end). And addr may have all ones
+    //   in positions between bit PDP_SHIFT (bit 30) and bit 38
+    //   (took 38 from pml4.png picture from the root of the repo). Then we add
+    //   2^(class_size + 12). If class size is at least 18 (but it's less than
+    //   27, we know it from the code above, because we'd already fill it up
+    //   with pml4 entries otherwize), then we add to a bit from 30 to 38, this
+    //   will cause us to overflow.
+    //   In such a case we have to assign pdpi1 512, because pdp index for end - 1
+    //   can't overflow, otherwise it's in the next pml4 entry (next pdp), but
+    //   we already know we our region is fully in this pdp (concluded in some notes
+    //   above).
+    //   With that in mind, pdp index for end may only overflow to 512 (if we add
+    //   without an overflow, in a wider type), which will result in a zero, because
+    //   end's pdp entry is at most 511 (still in this pdp).
+    if (pdpi0 > pdpi1) {
+        assert(pdpi1 == 0); // Assert the comment above.
+        pdpi1 = PDP_ENTRY_COUNT;
     }
-    /* Calculate kernel virtual address of page directory */
-    pde_t *pd = KADDR(PTE_ADDR(pdp[pdpi0]));
+    /* Fill PDP entry range if page size is larger than 1GB */
+    if (page->class >= 18) {
+        return alloc_fill_pt(pdp, base, 1 * GB, pdpi0, pdpi1);
+    }
 
+    // BUG: using pd before creating it.
+    // pde_t *pd = KADDR(PTE_ADDR(pdp[pdpi0]));
+
+    // With the same logic as with pml4, we now conclude that
+    // page->class < 18, the region is in the one page directory (pdp entry).
+
+    /* Allocate empty pdp, if it wasn't there. */
+    if ((pdp[pdpi0] & PTE_P) == 0 && alloc_pt(pdp + pdpi0) < 0) {
+        return -E_NO_MEM;
+    } /* ...or split 1GB page into 2MB pages if required */
+    else if ((pdp[pdpi0] & PTE_PS) != 0) {
+        // This means the pdp was there:
+        //   we get here if (pdp[pdpi0] & PTE_P) != 0 || alloc_ptr(pdp + pdpi0) == 0
+        //   TODO: continue.
+        pdpe_t old = pdp[pdpi0];
+        if (alloc_pt(pdp + pdpi0) < 0) {
+            return -E_NO_MEM;
+        }
+        pde_t *pd = KADDR(PTE_ADDR(pdp[pdpi0]));
+        if (alloc_fill_pt(pd, old & ~PTE_PS, 2 * MB, 0, PT_ENTRY_COUNT) < 0) {
+            return -E_NO_MEM;
+        }
+    }
+    //cprintf("pd = %p.\n", pd);
+    pde_t *pd = KADDR(PTE_ADDR(pdp[pdpi0]));
+    //cprintf("pd = %p.\n", pd);
+    //assert(0);
 
     /* If requested region is larger than or equal to 2MB (at least one whole PT) */
 
@@ -961,8 +1255,26 @@ map_page(struct AddressSpace *spc, uintptr_t addr, struct Page *page, int flags)
 
     // LAB 7: Your code here
 
-    (void)pd;
-    size_t pdi0 = 0, pdi1 = 0;
+    size_t pdi0 = PD_INDEX(addr);
+    size_t pdi1 = PD_INDEX(end);
+    // The same logic as with pdp, please, check above. If anything, I can
+    //   write the same for this case also (I'd just copypaste, change
+    //   numbers, that won't be difficult, and I'll answer your questions).
+    if (pdi0 > pdi1) {
+        pdi1 = PD_ENTRY_COUNT;
+    }
+
+    /* Fill PD entry range if page size is at least 2MB (a full pt) */
+    if (page->class >= 9) {
+        // BUG: wrong size! Copypaste enjoyer.. :)
+        // return alloc_fill_pt(pd, base, 1 * GB, pdi0, pdi1);
+        return alloc_fill_pt(pd, base, 2 * MB, pdi0, pdi1);
+    }
+
+    // Otherwise, size is less than 2mb and we stay in the same PD entry (PT).
+    //   The same logic as with pml4. Please, check above and ask
+    //   me to explain this case (and add a comment, I'll happily do that),
+    //   if anything.
 
     /* Allocate empty pt or split 2MB page into 4KB pages if required and
      * calculate virtual address into pt.
@@ -971,15 +1283,35 @@ map_page(struct AddressSpace *spc, uintptr_t addr, struct Page *page, int flags)
 
     // LAB 7: Your code here
 
-    (void)pdi0, (void)pdi1;
-    pte_t *pt = NULL;
+    /* Allocate empty pt... */
+    if ((pd[pdi0] & PTE_P) == 0 && alloc_pt(pd + pdi0) < 0) {
+        return -E_NO_MEM;
+    }
+    /* ...or split 2MB page into 4KB pages if required */
+    else if ((pd[pdi0] & PTE_PS) != 0) {
+        pde_t old = pd[pdi0];
+        if (alloc_pt(pd + pdi0) < 0) {
+            return -E_NO_MEM;
+        }
+        pte_t *pt = KADDR(PTE_ADDR(pd[pdi0]));
+        if (alloc_fill_pt(pt, old & ~PTE_PS, 4 * KB, 0, PT_ENTRY_COUNT) < 0) {
+            return -E_NO_MEM;
+        }
+    }
+    /* Calculate kernel virtual address of page */
+    pde_t *pt = KADDR(PTE_ADDR(pd[pdi0]));
 
     /* If requested region is larger than or equal to 4KB (at least one whole page) */
 
-    size_t pti0 = PT_INDEX(addr), pti1 = PT_INDEX(end);
-    if (pti0 > pti1) pti1 = PT_ENTRY_COUNT;
+    size_t pti0 = PT_INDEX(addr);
+    size_t pti1 = PT_INDEX(end);
+    if (pti0 > pti1) { /*cprintf("map_page: 12.\n");*/ pti1 = PT_ENTRY_COUNT; }
     /* Fill PT range if page size is larger than 4KB */
-    if (page->class >= 0) return alloc_fill_pt(pt, base, 4 * KB, pti0, pti1);
+    if (page->class >= 0) {
+        // TODO: explain, why we do this.
+        return alloc_fill_pt(pt, base, 4 * KB, pti0, pti1);
+    }
+
 
     /* We cannot allocate less than a page */
     assert(0);
@@ -1130,7 +1462,7 @@ map_physical_region(struct AddressSpace *dst, uintptr_t dstart, uintptr_t pstart
         }
     }
 
-    for (; class >= 0 && start < end; class --) {
+    for (; class >= 0 && start < end; --class) {
         while (start + CLASS_SIZE(class) <= end) {
             struct Page *page = page_lookup(NULL, pstart, class, PARTIAL_NODE, 1);
             assert(page);
@@ -1442,12 +1774,47 @@ release_address_space(struct AddressSpace *space) {
  *
  * Returns old address space
  */
+// If qemu suddenly closes, it may get an exception or triple fault.
+//   You can add -d int,cpu_reset args to debug that. Also there
+//   may be more useful debugging args for qemu.
 struct AddressSpace *
 switch_address_space(struct AddressSpace *space) {
     assert(space);
-    ///LAB 7: Your code here
-    return NULL;
+    // LAB 7: Your code here
+
+    if (space == current_space) {
+        // Don't switch address space if new address space
+        //   is the same as the old one, because that would
+        //   cause the cache of PML4 to be invalidated.
+        // The way I figured this out is following: I guessed,
+        //   then I searched in yandex "MMU caching of page tables",
+        //   found some results. Also, at a class we were told
+        //   there is caching of page directories.
+        // Then I thought I need to check what happens, when we
+        //   we change cr3. If cache is always invalidated,
+        //   even when it's the same value as before.
+        // From https://www.programmersought.com/article/2389166081/:
+        //   Loading CR3 with the MOV instruction has the side effect
+        //   of invalidating the page cache. To reduce the number of
+        //   bus cycles required for address translation, the most
+        //   recently accessed page directory and page table are stored
+        //   in the page cache block of the processor, which is called
+        //   the Translation Lookaside Buffer (TLB). The page table entry
+        //   is read from memory using an additional bus cycle only if
+        //   the required page table entry is not included in the TLB.
+        return current_space;
+    }
+
+    struct AddressSpace* old_space = current_space;
+    current_space = space;
+    // Check the definition of AddressSpace struct: physical address of
+    //   pml4 (cr3) is stored in cr3 field there.
+    // Use inc/x86.h function to set cr3.
+    lcr3(current_space->cr3);
+
+    return old_space;
 }
+
 
 /* Buffers for filler pages are statically allocated for simplicity
  * (this is also required for early KASAN) */
@@ -1680,9 +2047,6 @@ init_shadow_pre(void) {
 
 void
 init_memory(void) {
-    int res;
-    (void)res;
-
     init_allocator();
     if (trace_init) cprintf("Memory allocator is initiallized\n");
 
@@ -1696,30 +2060,91 @@ init_memory(void) {
      * and KASAN shadow memory regions to new kernel address space.
      * Allocated memory should not be touches until address space switch */
 
-    /* Map physical memroy onto kernel address space weakly... */
+    /* Map physical memory onto kernel address space weakly... */
     /* NOTE We cannot use map_region to map memory allocated with ALLOC_WEAK */
 
     // LAB 7: Your code here
     // NOTE: You need to check if map_physical_region returned 0 everywhere! (and panic otherwise)
     // Map [0, max_memory_map_addr] to [KERN_BASE_ADDR, KERN_BASE_ADDR + max_memory_map_addr] as RW- + ALLOC_WEAK
+    
+    // Task statement mentions map_physical_region! We may have to use that!
+    //   max_memory_map_addr is not actually an address, but size! At least,
+    //   it's what's said in definition.
+    // NOTE: this may limit physical memory size! It's also said in the lab
+    //   statement, that we use kernel address space high addresses to
+    //   reference physical memory, when needed. If kernel space high addresses
+    //   are not enough, then we won't be able to reference physical memory?
+    //   In order to use this argument we have to find places, where it'd fail
+    //   to use more physial memory because of these restriction. And list them all.
+    // NOTE: if we need PROT_CD for some drivers, we need to allocate a virtual space
+    //   page without mapping it. And then map to our area. That's how we use
+    //   reference counting also: one physical region may be mapped to many virtual
+    //   pages. With different flags, that's alright.
+    if (map_physical_region(&kspace, KERN_BASE_ADDR, 0, max_memory_map_addr, PROT_R | PROT_W | ALLOC_WEAK) != 0) {
+        // Kernel space needs to reference physical memory and we failed to map it.
+        panic("mm: failed to map physical memory to kernel space.");
+    }
 
+    // check_physical_tree(&root);
+    // check_virtual_tree(kspace.root, MAX_CLASS);
+    // cprintf("Memory init done!\n");
+    // assert(0);
+
+    // // Just to test map_page and unmap_page.
+    // struct Page* phys_page = alloc_page(0, 0); // 1 * 4kb = 4kb page.
+    // assert(phys_page != NULL);
+    // assert_physical(phys_page);
+    // // KERN_BASE_ADDR is kernel image base, also we may physical
+    // //   memory starting from address 0 there.
+    // assert(map_page(&kspace, KERN_BASE_ADDR - 128 * KB, phys_page, 0) == 0);
+    // check_physical_tree(&root);
+    // check_virtual_tree(kspace.root, MAX_CLASS);
+    // // cprintf("Check with qemu console (C-a c in qemu-nox) that at addr %llx there are bytes 0x1 0x2 0x3.\n", KERN_BASE_ADDR - 128 * KB);
+    // // cprintf("gva2gpa 0x%llx, x /24b 0x%llx, xp /24b <gva2gpa output>.\n", KERN_BASE_ADDR - 128 * KB, KERN_BASE_ADDR - 128 * KB);
+    // // // We can't do this, because the memory is not mapped yet.
+    // // //   By the time we switch address space, map_page will already
+    // // //   be checked multiple times. We can just check that
+    // // //   check_virtual_tree doesn't fail and map_page inside itself
+    // // //   doesn't assert.
+    // // // memcpy((void*) (KERN_BASE_ADDR - - 128 * KB), "\x1\x2\x3", 3);
+    // // // volatile bool done = false;
+    // // // while (!done);
+    // unmap_page(&kspace, KERN_BASE_ADDR - 128 * KB, phys_page->class);
+    // check_physical_tree(&root);
+    // check_virtual_tree(kspace.root, MAX_CLASS);
+    // cprintf("Memory init done!\n");
+    // assert(0);
 
     extern char __text_end[], __text_start[];
-    assert(!((uintptr_t)__text_start & CLASS_MASK(0)));
+    assert(((uintptr_t)__text_start & CLASS_MASK(0)) == 0);
     assert(__text_end - __text_start < MAX_LOW_ADDR_KERN_SIZE);
     assert((uintptr_t)(end - KERN_BASE_ADDR) < MIN(BOOT_MEM_SIZE, max_memory_map_addr));
 
     /* ...and make kernel .text section executable: */
 
     // LAB 7: Your code here
-    // Map [PADDR(__text_start);PADDR(__text_end)] to [__text_start, __text_end] as RW-
-
+    // Map PA:[PADDR(__text_start);PADDR(__text_end)] to VA:[__text_start, __text_end] as R-X
+    if (map_physical_region(&kspace, (uintptr_t) __text_start, PADDR(__text_start), __text_end - __text_start + 1, PROT_R | PROT_X) != 0) {
+        // Map kernel code physical address to expected kernel code virtual address
+        //   It's encoded in instructions and at the moment we don't do any ASLR.
+        //   If we'd have ASLR, compiler would just generate rip-relative addressing
+        //   for global variables and function calls.
+        panic("mm: failed to map kernel code to virtual space.");
+    }
 
     /* Allocate kernel stacks */
 
     // LAB 7: Your code here
-    // Map [PADDR(bootstack), PADDR(bootstack) + KERN_STACK_SIZE] to [KERN_STACK_TOP - KERN_STACK_SIZE, KERN_STACK_TOP] as RW-
-    // Map [PADDR(pfstack), PADDR(pfstack) + KERN_PF_STACK_SIZE] to [KERN_PF_STACK_TOP - KERN_PF_STACK_SIZE, KERN_PF_STACK_TOP] as RW-
+    // Map [PADDR(bootstack), PADDR(bootstack) + KERN_STACK_SIZE) to [KERN_STACK_TOP - KERN_STACK_SIZE, KERN_STACK_TOP) as RW-
+    if (map_physical_region(&kspace, KERN_STACK_TOP - KERN_STACK_SIZE, PADDR(bootstack), KERN_STACK_SIZE, PROT_R | PROT_W) != 0) {
+        // Map kernel boot stack physical memory range to stack virtual memory range. 
+        panic("mm: failed to map kernel stack to virtual space.");
+    }
+    // Map [PADDR(pfstack), PADDR(pfstack) + KERN_PF_STACK_SIZE) to [KERN_PF_STACK_TOP - KERN_PF_STACK_SIZE, KERN_PF_STACK_TOP) as RW-
+    if (map_physical_region(&kspace, KERN_PF_STACK_TOP - KERN_PF_STACK_SIZE, PADDR(pfstack), KERN_PF_STACK_SIZE, PROT_R | PROT_W) != 0) {
+        // Map pagefault handler stack physical memory range to it's virtual memory range. 
+        panic("mm: failed to map pagefault handler stack to virtual space.");
+    }
 
 #ifdef SANITIZE_SHADOW_BASE
     init_shadow_pre();
@@ -1728,10 +2153,14 @@ init_memory(void) {
     EFI_MEMORY_DESCRIPTOR *mstart = (void *)uefi_lp->MemoryMap;
     EFI_MEMORY_DESCRIPTOR *mend = (void *)((uint8_t *)mstart + uefi_lp->MemoryMapSize);
     for (; mstart < mend; mstart = (void *)((uint8_t *)mstart + uefi_lp->MemoryMapDescriptorSize)) {
-        if (mstart->Attribute & EFI_MEMORY_RUNTIME) {
+        if ((mstart->Attribute & EFI_MEMORY_RUNTIME) != 0) {
             // LAB 7: Your code here
-            // Map [mstart->PhysicalStart, mstart->PhysicalStart+mstart->NumberOfPages*PAGE_SIZE] to
-            //     [mstart->VirtualStart, mstart->VirtualStart+mstart->NumberOfPages*PAGE_SIZE] as RW-
+            // Map [mstart->PhysicalStart, mstart->PhysicalStart+mstart->NumberOfPages*PAGE_SIZE) to
+            //     [mstart->VirtualStart, mstart->VirtualStart+mstart->NumberOfPages*PAGE_SIZE) as RW-
+            if (map_physical_region(&kspace, mstart->VirtualStart, mstart->PhysicalStart, mstart->NumberOfPages * PAGE_SIZE, PROT_R | PROT_W) != 0) {
+                // Map an uefi runtime services region.
+                panic("mm: failed to map an uefi runtime memory region (virtual_start = %p, physical_start = %p, num_pages = %lu).", (void*) mstart->VirtualStart, (void*) mstart->PhysicalStart, mstart->NumberOfPages);
+            }
         }
     }
 
@@ -1777,7 +2206,7 @@ init_memory(void) {
     mstart = (void *)uefi_lp->MemoryMapVirt;
     mend = (void *)((uint8_t *)mstart + uefi_lp->MemoryMapSize);
     for (; mstart < mend; mstart = (void *)((uint8_t *)mstart + uefi_lp->MemoryMapDescriptorSize)) {
-        if (mstart->Attribute & EFI_MEMORY_RUNTIME) {
+        if ((mstart->Attribute & EFI_MEMORY_RUNTIME) != 0) {
             int expected;
             nosan_memcpy(&expected, KADDR(mstart->PhysicalStart), sizeof(int));
             assert(*(volatile int *)mstart->VirtualStart == expected);
@@ -1786,16 +2215,111 @@ init_memory(void) {
     /* Map the rest of memory regions after initiallizing shadow memory */
 
     // LAB 7: Your code here
-    // Map [FRAMEBUFFER, FRAMEBUFFER + uefi_lp->FrameBufferSize] to
-    //     [uefi_lp->FrameBufferBase, uefi_lp->FrameBufferBase + uefi_lp->FrameBufferSize] RW- + PROT_WC
-    // Map [X86ADDR(KERN_BASE_ADDR),MIN(MAX_LOW_ADDR_KERN_SIZE, max_memory_map_addr)] to
-    //     [0, MIN(MAX_LOW_ADDR_KERN_SIZE, max_memory_map_addr)] as RW + ALLOC_WEAK
-    // Map [X86ADDR((uintptr_t)__text_start),ROUNDUP(X86ADDR((uintptr_t)__text_end), CLASS_SIZE(0))] to
-    //     [PADDR(__text_start), ROUNDUP(__text_end, CLASS_SIZE(0))] as R-X
+    // Map [FRAMEBUFFER, FRAMEBUFFER + uefi_lp->FrameBufferSize) to
+    //     [uefi_lp->FrameBufferBase, uefi_lp->FrameBufferBase + uefi_lp->FrameBufferSize) RW- + PROT_WC
+    // TODO: убрать PROT_W, посмотреть, что произойдёт.
+    if (map_physical_region(&kspace, uefi_lp->FrameBufferBase, FRAMEBUFFER, uefi_lp->FrameBufferSize, PROT_R | PROT_W | PROT_WC) != 0) {
+        // Map framebuffer physical memory range to it's virtual memory range. 
+        panic("mm: failed to map framebuffer region (virtual_start = %p, physical_start = %p, size = %zx).", (void*) uefi_lp->FrameBufferBase, (void*) FRAMEBUFFER, (size_t) uefi_lp->FrameBufferSize);
+    }
+
+
+    // Map regions to 32-bit addresses, so that 32-bit uefi can access them.
+    // X86ADDR() from definition:
+    /* This macro takes a kernel virtual address and applies 32-bit mask to it.
+     * This is used for mapping required regions in kernel PML table so that
+     * required addresses are accessible in 32-bit uefi. */
+    // Map [X86ADDR(KERN_BASE_ADDR),MIN(KERN_BASE_ADDR + MAX_LOW_ADDR_KERN_SIZE-1, max_memory_map_addr)] to
+    //     [0, MIN(KERN_BASE_ADDR + MAX_LOW_ADDR_KERN_SIZE-1, max_memory_map_addr)] as RW + ALLOC_WEAK
+    // Map [X86ADDR((uintptr_t)__text_start),ROUNDUP(X86ADDR((uintptr_t)__text_end), CLASS_SIZE(0))) to
+    //     [PADDR(__text_start), ROUNDUP(__text_end, CLASS_SIZE(0))) as R-X
     // Map [X86ADDR(KERN_STACK_TOP - KERN_STACK_SIZE), KERN_STACK_TOP] to
     //     [PADDR(bootstack), PADDR(boottop)] as RW-
     // Map [X86ADDR(KERN_PF_STACK_TOP - KERN_PF_STACK_SIZE), KERN_PF_STACK_TOP] to
     //     [PADDR(pfstack), PADDR(pfstacktop)] as RW-
+    // Region #1.
+    // Map [X86ADDR(KERN_BASE_ADDR),MIN(KERN_BASE_ADDR + MAX_LOW_ADDR_KERN_SIZE-1, max_memory_map_addr)] to
+    //     [0, MIN(KERN_BASE_ADDR + MAX_LOW_ADDR_KERN_SIZE-1, max_memory_map_addr)] as RW + ALLOC_WEAK
+    size_t region_size = max_memory_map_addr + 1;
+    if (region_size > MAX_LOW_ADDR_KERN_SIZE) {
+        region_size = MAX_LOW_ADDR_KERN_SIZE;
+    }
+    // TODO: ask, why we use alloc weak here.
+    if (map_physical_region(&kspace, X86ADDR(KERN_BASE_ADDR), 0, region_size, PROT_R | PROT_W | ALLOC_WEAK) != 0) {
+        // Map physical memory to 32-bit high addresses, so that 32-bit uefi can access it. 
+        panic("mm: failed to map physical memory to 32-bit high addresses (virtual_start = %p, physical_start = %p, size = %zx).", (void*) X86ADDR(KERN_BASE_ADDR), (void*) 0, region_size);
+    }
+    // Region #2.
+    // Map [X86ADDR((uintptr_t)__text_start),ROUNDUP(X86ADDR((uintptr_t)__text_end), CLASS_SIZE(0))) to
+    //     [PADDR(__text_start), ROUNDUP((uintptr_t) __text_end, CLASS_SIZE(0))) as R-X
+    uintptr_t region_va_end   = ROUNDUP(X86ADDR((uintptr_t)__text_end), CLASS_SIZE(0));
+    uintptr_t region_pa_end   = ROUNDUP((uintptr_t) __text_end, CLASS_SIZE(0));
+    uintptr_t region_va_start = X86ADDR((uintptr_t)__text_start);
+    uintptr_t region_pa_start = PADDR(__text_start);
+    // This actually doesn't hold. Got a trigger of this. Just use not
+    //   more than both of these allow. It may be a bad thing, every
+    //   time we pass something to 32-bit uefi, we need to check
+    //   if 64-bit physical address fits into the mapped range.
+    //assert(region_va_end - region_va_start == region_pa_end - region_pa_start); // TODO: analyse, if it's always true.
+    size_t phys_region_size = region_pa_end - region_pa_start;
+    size_t virt_region_size = region_va_end - region_va_start;
+    region_size     = phys_region_size;
+    if (region_size > virt_region_size) {
+        region_size = virt_region_size;
+    }
+    if (map_physical_region(&kspace, region_va_start, region_pa_start, region_size, PROT_R | PROT_X) != 0) {
+        // Map kernel to 32-bit kernel region, so that 32-bit uefi can access it.
+        panic("mm: failed to map kernel to 32-bit kernel region (virtual_start = %p, physical_start = %p, size = %zx).", (void*) region_va_start, (void*) region_pa_start, region_size);
+    }
+    // Region #3.
+    // Map [X86ADDR(KERN_STACK_TOP - KERN_STACK_SIZE), KERN_STACK_TOP) to
+    //     [PADDR(bootstack), PADDR(bootstack) + KERN_STACK_SIZE) as RW-
+    region_va_end   = KERN_STACK_TOP;
+    region_pa_end   = PADDR(bootstack) + KERN_STACK_SIZE;
+    region_va_start = X86ADDR(KERN_STACK_TOP - KERN_STACK_SIZE);
+    region_pa_start = PADDR(bootstack);
+    // Message below actually true, not a simple copypaste, got a
+    //   trigger.
+    // This actually doesn't hold. Got a trigger of this. Just use not
+    //   more than both of these allow. It may be a bad thing, every
+    //   time we pass something to 32-bit uefi, we need to check
+    //   if 64-bit physical address fits into the mapped range.
+    //assert(region_va_end - region_va_start == region_pa_end - region_pa_start); // TODO: analyse, if it's always true.
+    phys_region_size = region_pa_end - region_pa_start;
+    virt_region_size = region_va_end - region_va_start;
+    region_size     = phys_region_size;
+    if (region_size > virt_region_size) {
+        region_size = virt_region_size;
+    }
+    if (map_physical_region(&kspace, region_va_start, region_pa_start, region_size, PROT_R | PROT_W) != 0) {
+        // Map kernel stack to 32-bit region, so that 32-bit uefi can access it.
+        panic("mm: failed to map kernel stack to 32-bit region (virtual_start = %p, physical_start = %p, size = %zx).", (void*) region_va_start, (void*) region_pa_start, region_size);
+    }
+    // Region #4.
+    // Map [X86ADDR(KERN_PF_STACK_TOP - KERN_PF_STACK_SIZE), KERN_PF_STACK_TOP) to
+    //     [PADDR(pfstack), PADDR(pfstacktop)) as RW-
+    region_va_end   = KERN_PF_STACK_TOP;
+    region_pa_end   = PADDR(pfstacktop);
+    region_va_start = X86ADDR(KERN_PF_STACK_TOP - KERN_PF_STACK_SIZE);
+    region_pa_start = PADDR(pfstack);
+    // Message below actually true, not a simple copypaste, got a
+    //   trigger.
+    // This actually doesn't hold. Got a trigger of this. Just use not
+    //   more than both of these allow. It may be a bad thing, every
+    //   time we pass something to 32-bit uefi, we need to check
+    //   if 64-bit physical address fits into the mapped range.
+    //assert(region_va_end - region_va_start == region_pa_end - region_pa_start); // TODO: analyse, if it's always true.
+    phys_region_size = region_pa_end - region_pa_start;
+    virt_region_size = region_va_end - region_va_start;
+    region_size     = phys_region_size;
+    if (region_size > virt_region_size) {
+        region_size = virt_region_size;
+    }
+    if (map_physical_region(&kspace, region_va_start, region_pa_start, region_size, PROT_R | PROT_W) != 0) {
+        // Map kernel pagefault stack to 32-bit region, so that 32-bit uefi can access it.
+        panic("mm: failed to map kernel pagefault stack to 32-bit region (virtual_start = %p, physical_start = %p, size = %zx).", (void*) region_va_start, (void*) region_pa_start, region_size);
+    }
+
 
     if (trace_memory_more) dump_page_table(kspace.pml4);
 

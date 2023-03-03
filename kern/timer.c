@@ -117,7 +117,7 @@ acpi_verify_sdt_header(ACPISDTHeader const* sdt_header, char const* signature) {
 
 // TODO: use mmio_map_region, mmio_remap_last_region
 static void *
-acpi_find_table(const char *signature) {
+acpi_find_table(const char *signature, size_t header_size) {
     /*
      * This function performs lookup of ACPI table by its signature
      * and returns valid pointer to the table mapped somewhere.
@@ -126,14 +126,17 @@ acpi_find_table(const char *signature) {
      *
      * HINT: Use mmio_map_region/mmio_remap_last_region
      * before accessing table addresses
-     * (Why mmio_remap_last_region is requrired?)
+     * (Why mmio_remap_last_region is required?)
      * HINT: RSDP address is stored in uefi_lp->ACPIRoot
      * HINT: You may want to distunguish RSDT/XSDT
      */
 
     // LAB 5: Your code here
 
-    RSDP* rsdp = (RSDP*) uefi_lp->ACPIRoot;
+    // Map region before usage, so that
+    //   to not hit a page fault.
+    RSDP* rsdp = (RSDP*) mmio_map_region(uefi_lp->ACPIRoot, sizeof(RSDP));
+
     // JOS assumes it's not ACPI 1.0 in the structure typedef.
     // And we later assume it has extended checksum.
     assert(rsdp->Revision >= 2);
@@ -173,19 +176,33 @@ acpi_find_table(const char *signature) {
     // Such hardware could have two copies of xsdt in different places.
     assert((uint32_t) rsdp->XsdtAddress == rsdp->XsdtAddress);
 
-    cprintf("1\n");
+    // Map region before usage, so that
+    //   to not hit a page fault.
+    XSDT* xsdt = (XSDT*) mmio_map_region(rsdp->XsdtAddress, sizeof(XSDT));
 
-    if (!acpi_verify_sdt_header((ACPISDTHeader const*) rsdp->XsdtAddress, "XSDT")) {
+    if (!acpi_verify_sdt_header((ACPISDTHeader const*) xsdt, "XSDT")) {
         return NULL;
     }
     
-    XSDT* xsdt = (XSDT*) rsdp->XsdtAddress;
-
     size_t num_tables = (xsdt->h.Length - sizeof(xsdt->h)) / sizeof(uint64_t);
+    // Find the right table.
+    ACPISDTHeader* sdt_header = NULL;
     for (size_t i = 0; i < num_tables; ++i) {
         uint64_t table_address = xsdt->PointerToOtherSDT[i];
 
-        ACPISDTHeader* sdt_header = (ACPISDTHeader*) table_address;
+        // Map region before usage, so that
+        //   to not hit a page fault.
+        // Remap previously mapped region.
+        //   So that we don't exhaust mmio
+        //   area.
+        // ACPISDTHeader* sdt_header = NULL;
+        if (i == 0) {
+            // First region is mapped.
+            sdt_header = (ACPISDTHeader*) mmio_map_region(table_address, sizeof(ACPISDTHeader));
+        } else {
+            // Remap last region.
+            sdt_header = (ACPISDTHeader*) mmio_remap_last_region(table_address, sdt_header, sizeof(ACPISDTHeader), sizeof(ACPISDTHeader));            
+        }
         if (strncmp(sdt_header->Signature, signature, sizeof(sdt_header->Signature)) != 0) {
             continue;
         }
@@ -198,8 +215,18 @@ acpi_find_table(const char *signature) {
             continue;
         }
 
-        return (void*) table_address;
+        // Remap to real size of structure, we looked at some number
+        //   of sizeof(ACPISDTHeader) first bytes (we didn't know
+        //   if memory is correct, map what's needed).
+        // Expand this region. It's great it's
+        //   the last region (and we don't have
+        //   SMP in that sense).
+        return mmio_remap_last_region(table_address, sdt_header, sizeof(ACPISDTHeader), header_size);
     }
+    // Didn't find the table, but used a mmio region.
+    //   Not a problem, because we use functions
+    //   like get_fadt, they won't call us anymore
+    //   for that table.
 
     return NULL;
 }
@@ -212,9 +239,14 @@ get_fadt(void) {
     // HINT: ACPI table signatures are
     //       not always as their names
 
+    static bool tried_to_find = false;
     static FADT *kfadt = NULL;
-    if (kfadt == NULL) {
-        kfadt = acpi_find_table("FACP");
+    if (kfadt == NULL && !tried_to_find) {
+        kfadt = acpi_find_table("FACP", sizeof(FADT));
+        // If returns NULL, there's no such table.
+        //   It won't appear out of nothing, so
+        //   it's ok.
+        tried_to_find = true;
     }
 
     if (kfadt == NULL) {
@@ -230,9 +262,14 @@ get_hpet(void) {
     // LAB 5: Your code here
     // (use acpi_find_table)
 
+    static bool tried_to_find = false;
     static HPET *khpet = NULL;
     if (khpet == NULL) {
-        khpet = acpi_find_table("HPET");
+        khpet = acpi_find_table("HPET", sizeof(HPET));
+        // If returns NULL, there's no such table.
+        //   It won't appear out of nothing, so
+        //   it's ok.
+        tried_to_find = true;
     }
 
     if (khpet == NULL) {
